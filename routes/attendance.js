@@ -5,6 +5,16 @@ const moment = require('moment');
 const XLSX = require('xlsx');
 const { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType, AlignmentType, TextRun } = require('docx');
 
+// 获取数据库类型
+const dbType = require('../config/database').dbType;
+
+// 日期表达式辅助函数（兼容 MySQL 和 PostgreSQL）
+function getDateExpr(column) {
+  return dbType === 'postgresql' 
+    ? `${column}::date`
+    : `DATE(${column})`;
+}
+
 // 打卡（上班/下班）
 router.post('/punch', async (req, res) => {
   try {
@@ -64,8 +74,9 @@ router.post('/punch', async (req, res) => {
     const employee = employees[0];
 
     // 检查今天是否已有打卡记录
+    const dateExpr = getDateExpr('punch_time');
     const [existingRecords] = await db.promise.execute(
-      'SELECT * FROM attendance WHERE employee_id = ? AND DATE(punch_time) = ?',
+      `SELECT * FROM attendance WHERE employee_id = ? AND ${dateExpr} = ?`,
       [employeeId, today]
     );
 
@@ -299,6 +310,7 @@ router.get('/records', async (req, res) => {
 // 获取今日打卡统计
 router.get('/today-stats', async (req, res) => {
   try {
+    const dbType = require('../config/database').dbType;
     const today = moment().format('YYYY-MM-DD');
     
     // 应到人数：员工总数
@@ -309,12 +321,25 @@ router.get('/today-stats', async (req, res) => {
     `);
     const expectedCount = allEmployees.length;
 
+    // 今日已请假的员工（已批准或待审批的请假）
+    const [todayLeaves] = await db.promise.execute(`
+      SELECT DISTINCT employee_id 
+      FROM leave_requests 
+      WHERE start_date <= ? AND end_date >= ? 
+        AND status IN ('approved', 'pending')
+    `, [today, today]);
+    const leaveEmployeeIds = todayLeaves.map(r => r.employee_id);
+
     // 今日到岗（上班到岗视为实到）
+    // 使用日期范围查询，避免时区问题
+    const startOfDay = `${today} 00:00:00`;
+    const endOfDay = `${today} 23:59:59`;
     const [todayCheckins] = await db.promise.execute(`
       SELECT DISTINCT employee_id 
       FROM attendance 
-      WHERE DATE(punch_time) = ? AND type = 'checkin'
-    `, [today]);
+      WHERE punch_time >= ? AND punch_time < ? AND type = 'checkin'
+    `, [startOfDay, moment(today).add(1, 'day').format('YYYY-MM-DD 00:00:00')]);
+    
     const presentIds = todayCheckins.map(r => r.employee_id);
     const presentCount = presentIds.length;
 
@@ -324,12 +349,14 @@ router.get('/today-stats', async (req, res) => {
       FROM attendance a
       LEFT JOIN employees e ON a.employee_id = e.id
       LEFT JOIN departments d ON e.department_id = d.id
-      WHERE DATE(a.punch_time) = ? AND a.status IN ('late', 'early')
+      WHERE punch_time >= ? AND punch_time < ? AND a.status IN ('late', 'early')
       ORDER BY a.punch_time DESC
-    `, [today]);
+    `, [startOfDay, moment(today).add(1, 'day').format('YYYY-MM-DD 00:00:00')]);
 
-    // 未到：未上班到岗的员工
-    const absentEmployees = allEmployees.filter(emp => !presentIds.includes(emp.id));
+    // 未到：未上班到岗且未请假的员工
+    const absentEmployees = allEmployees.filter(emp => 
+      !presentIds.includes(emp.id) && !leaveEmployeeIds.includes(emp.id)
+    );
     const absentCount = absentEmployees.length;
 
     // 组装异常列表：优先展示迟到/早退，其次未到
@@ -364,6 +391,14 @@ router.get('/today-stats', async (req, res) => {
       WHERE status = 'pending'
         AND start_date <= ? AND end_date >= ?
     `, [today, today]);
+    
+    // 今日已批准请假数量
+    const [approvedLeaves] = await db.promise.execute(`
+      SELECT COUNT(*) AS approved_count
+      FROM leave_requests
+      WHERE status = 'approved'
+        AND start_date <= ? AND end_date >= ?
+    `, [today, today]);
 
     // 顶部提示
     let alertText = '✅ 今日考勤正常';
@@ -388,8 +423,10 @@ router.get('/today-stats', async (req, res) => {
         expectedCount,
         presentCount,
         absentCount,
+        leaveCount: leaveEmployeeIds.length, // 请假人数
         anomalies,
         pendingLeaveCount: pendingLeaves[0].pending_count || 0,
+        approvedLeaveCount: approvedLeaves[0].approved_count || 0,
         alertText,
         alertType
       }
@@ -703,27 +740,35 @@ router.get('/stats', async (req, res) => {
     `;
     
     // 4. 迟到早退统计（按员工）
+    const dbType = require('../config/database').dbType;
+    // PostgreSQL 的 HAVING 子句不能直接使用别名，需要重复表达式
+    const lateCountExpr = "COUNT(CASE WHEN a.status = 'late' THEN 1 END)";
+    const earlyCountExpr = "COUNT(CASE WHEN a.status = 'early' THEN 1 END)";
     const abnormalStatsQuery = `
       SELECT 
         e.name as employee_name,
         e.employee_no,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(CASE WHEN a.status = 'early' THEN 1 END) as early_count,
+        ${lateCountExpr} as late_count,
+        ${earlyCountExpr} as early_count,
         SUM(CASE WHEN a.status = 'late' THEN a.late_minutes ELSE 0 END) as total_late_minutes,
         SUM(CASE WHEN a.status = 'early' THEN a.early_minutes ELSE 0 END) as total_early_minutes
       FROM attendance a
       LEFT JOIN employees e ON a.employee_id = e.id
       ${whereClause}
       GROUP BY a.employee_id, e.name, e.employee_no
-      HAVING late_count > 0 OR early_count > 0
-      ORDER BY (late_count + early_count) DESC
+      HAVING ${lateCountExpr} > 0 OR ${earlyCountExpr} > 0
+      ORDER BY (${lateCountExpr} + ${earlyCountExpr}) DESC
       LIMIT 10
     `;
     
     // 5. 月度考勤汇总
+    // MySQL 使用 DATE_FORMAT，PostgreSQL 使用 TO_CHAR
+    const monthExpr = dbType === 'postgresql' 
+      ? "TO_CHAR(a.punch_time, 'YYYY-MM')"
+      : "DATE_FORMAT(a.punch_time, '%Y-%m')";
     const monthlyStatsQuery = `
       SELECT 
-        DATE_FORMAT(a.punch_time, '%Y-%m') as month,
+        ${monthExpr} as month,
         COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
         COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
         COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
@@ -731,7 +776,7 @@ router.get('/stats', async (req, res) => {
       FROM attendance a
       ${departmentId ? 'LEFT JOIN employees e ON a.employee_id = e.id' : ''}
       ${whereClause}
-      GROUP BY DATE_FORMAT(a.punch_time, '%Y-%m')
+      GROUP BY ${monthExpr}
       ORDER BY month ASC
     `;
     
@@ -903,9 +948,11 @@ router.post('/import-device', async (req, res) => {
         }
         
         // 检查是否已存在相同的打卡记录（避免重复导入）
+        const checkinDateExpr = getDateExpr('punch_time');
+        const checkinDate = moment(checkinTime).format('YYYY-MM-DD');
         const [existingCheckin] = await db.promise.execute(
-          'SELECT id FROM attendance WHERE employee_id = ? AND type = ? AND DATE(punch_time) = DATE(?)',
-          [emp.id, 'checkin', checkinTime]
+          `SELECT id FROM attendance WHERE employee_id = ? AND type = ? AND ${checkinDateExpr} = ?`,
+          [emp.id, 'checkin', checkinDate]
         );
         
         if (existingCheckin.length === 0) {
@@ -917,9 +964,11 @@ router.post('/import-device', async (req, res) => {
         }
         
         // 检查是否已存在相同的打卡记录
+        const checkoutDateExpr = getDateExpr('punch_time');
+        const checkoutDate = moment(checkoutTime).format('YYYY-MM-DD');
         const [existingCheckout] = await db.promise.execute(
-          'SELECT id FROM attendance WHERE employee_id = ? AND type = ? AND DATE(punch_time) = DATE(?)',
-          [emp.id, 'checkout', checkoutTime]
+          `SELECT id FROM attendance WHERE employee_id = ? AND type = ? AND ${checkoutDateExpr} = ?`,
+          [emp.id, 'checkout', checkoutDate]
         );
         
         if (existingCheckout.length === 0) {

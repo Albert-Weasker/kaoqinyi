@@ -79,6 +79,8 @@ router.post('/', async (req, res) => {
     const trueValue = dbType === 'postgresql' ? true : 1;
     const falseValue = dbType === 'postgresql' ? false : 0;
     
+    const isDefaultBool = is_default ? trueValue : falseValue;
+    
     // 如果设置为默认规则，先取消其他默认规则
     if (is_default) {
       await db.promise.execute(
@@ -92,8 +94,6 @@ router.post('/', async (req, res) => {
       'SELECT * FROM attendance_rules WHERE is_default = ? LIMIT 1',
       [trueValue]
     );
-
-    const isDefaultBool = is_default ? trueValue : falseValue;
     
     if (existing.length > 0) {
       // 更新现有默认规则
@@ -101,17 +101,49 @@ router.post('/', async (req, res) => {
         `UPDATE attendance_rules 
          SET rule_name = ?, checkin_time = ?, checkin_late_time = ?, 
              checkout_time = ?, checkout_early_time = ?, is_default = ?
-         WHERE is_default = ?`,
-        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool, trueValue]
+         WHERE id = ?`,
+        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool, existing[0].id]
       );
     } else {
       // 创建新规则
-      await db.promise.execute(
-        `INSERT INTO attendance_rules 
-         (rule_name, checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default) 
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool]
-      );
+      // 如果是 PostgreSQL，先确保序列正确
+      if (dbType === 'postgresql') {
+        try {
+          // 修复序列：设置为当前最大 ID + 1
+          await db.promise.execute(`
+            SELECT setval('attendance_rules_id_seq', COALESCE((SELECT MAX(id) FROM attendance_rules), 0) + 1, false)
+          `);
+        } catch (seqError) {
+          // 序列可能不存在，忽略错误，让数据库自动处理
+          console.warn('序列修复警告（可忽略）:', seqError.message);
+        }
+      }
+      
+      // 插入新规则
+      try {
+        await db.promise.execute(
+          `INSERT INTO attendance_rules 
+           (rule_name, checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default) 
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool]
+        );
+      } catch (insertError) {
+        // 如果插入失败（主键冲突），说明序列需要修复
+        if (dbType === 'postgresql' && insertError.code === '23505') {
+          // 修复序列后重试
+          await db.promise.execute(`
+            SELECT setval('attendance_rules_id_seq', (SELECT MAX(id) FROM attendance_rules) + 1, false)
+          `);
+          await db.promise.execute(
+            `INSERT INTO attendance_rules 
+             (rule_name, checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default) 
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool]
+          );
+        } else {
+          throw insertError;
+        }
+      }
     }
 
     res.json({

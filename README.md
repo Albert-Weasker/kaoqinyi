@@ -158,6 +158,39 @@ npm run dev
 
 项目使用 nodemon 进行开发，修改代码后会自动重启服务器。
 
+## 构建和部署
+
+### 本地构建
+
+```bash
+pnpm build
+```
+
+构建脚本会检查所有必要文件是否存在，并验证项目配置。
+
+### 部署到 Vercel
+
+1. 安装 Vercel CLI: `npm i -g vercel`
+2. 在项目根目录运行: `vercel`
+3. 在 Vercel 控制台设置环境变量：
+   - `DB_HOST`
+   - `DB_PORT`
+   - `DB_USER`
+   - `DB_PASSWORD`
+   - `DB_NAME`
+   - `PORT` (可选)
+
+项目已包含 `vercel.json` 配置文件，会自动处理路由。
+
+### 部署到其他平台
+
+项目包含 `netlify.toml` 配置文件，也可以部署到 Netlify 或其他支持 Node.js 的平台。
+
+**重要提示**：
+- 部署前确保设置了正确的数据库连接环境变量
+- 确保数据库可以从部署平台访问（可能需要配置防火墙）
+- 静态文件在 `public/` 目录，后端 API 在 `/api/*` 路由
+
 ## 许可证
 
 ISC

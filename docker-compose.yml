@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: kaoqinyi-mysql
+    restart: always
+    ports:
+      - "3333:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: kaoqinyi
+      MYSQL_USER: kaoqinyi
+      MYSQL_PASSWORD: kaoqinyi123
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: 
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    networks:
+      - kaoqinyi-network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  kaoqinyi-network:
+    driver: bridge

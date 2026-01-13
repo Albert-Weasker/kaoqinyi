@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>考勤管理系统</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- 顶部导航栏 -->
+    <header class="top-header">
+        <div class="header-left">
+            <h1 class="system-title">考勤管理系统</h1>
+        </div>
+        <div class="header-right">
+            <span class="current-time" id="currentTime"></span>
+            <span class="user-info">
+                <span class="username">管理员</span>
+            </span>
+        </div>
+    </header>
+
+    <div class="main-wrapper">
+        <!-- 左侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-search">
+                <input type="text" placeholder="Search" class="search-input">
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#home" class="nav-item" data-page="home">
+                    <span class="nav-icon">🏠</span>
+                    <span class="nav-text">今日情况</span>
+                </a>
+                <a href="#employees" class="nav-item" data-page="employees">
+                    <span class="nav-icon">👷</span>
+                    <span class="nav-text">员工名单</span>
+                </a>
+                <a href="#records" class="nav-item" data-page="records">
+                    <span class="nav-icon">📅</span>
+                    <span class="nav-text">考勤记录</span>
+                </a>
+                <a href="#leave" class="nav-item" data-page="leave">
+                    <span class="nav-icon">📝</span>
+                    <span class="nav-text">请假审批</span>
+                </a>
+                <a href="#stats" class="nav-item" data-page="stats">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-text">月度报表</span>
+                </a>
+                <a href="#rules" class="nav-item" data-page="rules">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-text">设置</span>
+                </a>
+                <a href="#departments" class="nav-item" data-page="departments">
+                    <span class="nav-icon">🏢</span>
+                    <span class="nav-text">部门设置</span>
+                </a>
+                <a href="#import" class="nav-item" data-page="import">
+                    <span class="nav-icon">📥</span>
+                    <span class="nav-text">数据导入</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="content-area">
+            <!-- 面包屑导航 -->
+            <div class="breadcrumb">
+                <span class="breadcrumb-icon">🏠</span>
+                <span class="breadcrumb-separator">/</span>
+                <span class="breadcrumb-text" id="breadcrumbText">主页</span>
+            </div>
+
+            <!-- 页面内容 -->
+            <div class="page-content">
+                <!-- 主页内容 -->
+                <div id="homePage" class="page">
+                    <h2 class="page-title">今日情况</h2>
+
+                    <!-- 顶部提示 -->
+                    <div class="alert-bar" id="homeAlertBar">
+                        <span id="homeAlertText">✅ 今日考勤正常</span>
+                    </div>
+
+                    <!-- 核心数字 -->
+                    <div class="core-cards">
+                        <div class="core-card expected">
+                            <div class="card-label">👷 应到人数</div>
+                            <div class="card-value" id="expectedCount">0 人</div>
+                        </div>
+                        <div class="core-card present">
+                            <div class="card-label">✅ 实到人数</div>
+                            <div class="card-value" id="presentCount">0 / 0 人</div>
+                        </div>
+                        <div class="core-card absent">
+                            <div class="card-label">❌ 未到人数</div>
+                            <div class="card-value" id="absentCount">0 / 0 人</div>
+                        </div>
+                    </div>
+
+                    <!-- 异常名单 -->
+                    <div class="anomaly-section">
+                        <div class="section-header">
+                            <h3 class="section-title">今日异常人员</h3>
+                        </div>
+                        <div class="anomaly-table-container">
+                            <table class="anomaly-table">
+                                <thead>
+                                    <tr>
+                                        <th>姓名</th>
+                                        <th>部门</th>
+                                        <th>状态</th>
+                                        <th>时间/原因</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="anomaliesTableBody">
+                                    <tr><td colspan="4" class="loading">加载中...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 快捷操作 -->
+                    <div class="quick-actions">
+                        <button class="btn action-btn primary" id="actionApprove">📝 批准请假</button>
+                        <button class="btn action-btn" id="actionExport">📤 导出今日考勤</button>
+                        <button class="btn action-btn" id="actionMonthly">📊 查看本月统计</button>
+                    </div>
+                </div>
+
+                <!-- 考勤记录页面 -->
+                <div id="recordsPage" class="page">
+                    <h2 class="page-title">考勤记录</h2>
+                    <div class="records-header">
+                        <div class="filter-group">
+                            <input type="date" id="startDate" class="form-control">
+                            <span>至</span>
+                            <input type="date" id="endDate" class="form-control">
+                            <select id="departmentFilter" class="form-control">
+                                <option value="">全部部门</option>
+                            </select>
+                            <input type="text" id="employeeSearch" class="form-control" placeholder="输入员工姓名或工号">
+                            <select id="statusFilter" class="form-control">
+                                <option value="">全部状态</option>
+                                <option value="normal">正常</option>
+                                <option value="late">迟到</option>
+                                <option value="early">早退</option>
+                            </select>
+                            <button class="btn btn-search" id="searchBtn">查询</button>
+                            <button class="btn btn-export" id="exportExcelBtn" title="导出为Excel">📊 Excel</button>
+                            <button class="btn btn-export" id="exportWordBtn" title="导出为Word">📄 Word</button>
+                        </div>
+                    </div>
+                    <div class="records-table-container">
+                        <table class="records-table">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>员工姓名</th>
+                                    <th>工号</th>
+                                    <th>部门</th>
+                                    <th>打卡类型</th>
+                                    <th>状态</th>
+                                    <th>异常时长</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recordsBody">
+                                <tr>
+                                    <td colspan="9" class="loading">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination" id="pagination"></div>
+                </div>
+
+                <!-- 考勤规则页面 -->
+                <div id="rulesPage" class="page">
+                    <h2 class="page-title">考勤规则设置</h2>
+                    <div class="rules-form">
+                        <div class="rules-grid">
+                            <div class="rule-item">
+                                <label>上班时间：</label>
+                                <input type="time" id="checkinTime" class="form-control" value="09:00">
+                            </div>
+                            <div class="rule-item">
+                                <label>迟到时间：</label>
+                                <input type="time" id="checkinLateTime" class="form-control" value="09:15">
+                                <small>超过此时间算迟到</small>
+                            </div>
+                            <div class="rule-item">
+                                <label>下班时间：</label>
+                                <input type="time" id="checkoutTime" class="form-control" value="18:00">
+                            </div>
+                            <div class="rule-item">
+                                <label>早退时间：</label>
+                                <input type="time" id="checkoutEarlyTime" class="form-control" value="17:45">
+                                <small>早于此时间算早退</small>
+                            </div>
+                        </div>
+                        <div class="rules-actions">
+                            <button class="btn btn-save" id="saveRulesBtn">保存规则</button>
+                        </div>
+                        <div class="rules-result" id="rulesResult"></div>
+                    </div>
+                </div>
+
+                <!-- 员工管理页面 -->
+                <div id="employeesPage" class="page">
+                    <h2 class="page-title">员工管理</h2>
+                    
+                    <!-- 操作栏 -->
+                    <div class="employees-actions">
+                        <div class="filter-group">
+                            <select id="employeesDepartmentFilter" class="form-control">
+                                <option value="">全部部门</option>
+                            </select>
+                            <input type="text" id="employeesSearch" class="form-control" placeholder="输入员工姓名或工号">
+                            <button class="btn btn-search" id="employeesSearchBtn">查询</button>
+                        </div>
+                    </div>
+
+                    <!-- 员工列表 -->
+                    <div class="employees-table-container">
+                        <table class="employees-table">
+                            <thead>
+                                <tr>
+                                    <th>工号</th>
+                                    <th>姓名</th>
+                                    <th>部门</th>
+                                    <th>职位</th>
+                                    <th>电话</th>
+                                    <th>标签</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="employeesBody">
+                                <tr>
+                                    <td colspan="7" class="loading">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 统计报表页面 -->
+                <div id="statsPage" class="page">
+                    <h2 class="page-title">统计报表</h2>
+                    
+                    <!-- 筛选条件 -->
+                    <div class="stats-filters">
+                        <div class="filter-group">
+                            <input type="date" id="statsStartDate" class="form-control">
+                            <span>至</span>
+                            <input type="date" id="statsEndDate" class="form-control">
+                            <select id="statsDepartmentFilter" class="form-control">
+                                <option value="">全部部门</option>
+                            </select>
+                            <button class="btn btn-search" id="statsSearchBtn">查询</button>
+                        </div>
+                    </div>
+
+                    <!-- 图表容器 -->
+                    <div class="charts-container">
+                        <!-- 每日考勤趋势 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">每日考勤趋势</h3>
+                            <canvas id="dailyTrendChart"></canvas>
+                        </div>
+
+                        <!-- 部门考勤统计 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">部门考勤统计</h3>
+                            <canvas id="departmentChart"></canvas>
+                        </div>
+
+                        <!-- 考勤状态分布 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">考勤状态分布</h3>
+                            <canvas id="statusChart"></canvas>
+                        </div>
+
+                        <!-- 迟到早退统计 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">迟到早退统计</h3>
+                            <canvas id="abnormalChart"></canvas>
+                        </div>
+
+                        <!-- 员工考勤排行 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">员工考勤排行（前10名）</h3>
+                            <canvas id="employeeRankChart"></canvas>
+                        </div>
+
+                        <!-- 月度考勤汇总 -->
+                        <div class="chart-card">
+                            <h3 class="chart-title">月度考勤汇总</h3>
+                            <canvas id="monthlyChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 请假管理页面 -->
+                <div id="leavePage" class="page">
+                    <h2 class="page-title">请假管理</h2>
+                    
+                    <!-- 操作栏 -->
+                    <div class="leave-actions">
+                        <button class="btn btn-primary" id="addLeaveBtn">录入请假</button>
+                        <div class="filter-group">
+                            <select id="leaveStatusFilter" class="form-control">
+                                <option value="">全部状态</option>
+                                <option value="pending">待审批</option>
+                                <option value="approved">已批准</option>
+                                <option value="rejected">已拒绝</option>
+                            </select>
+                            <select id="leaveDepartmentFilter" class="form-control">
+                                <option value="">全部部门</option>
+                            </select>
+                            <input type="text" id="leaveEmployeeSearch" class="form-control" placeholder="输入员工姓名或工号">
+                            <input type="date" id="leaveStartDate" class="form-control">
+                            <span>至</span>
+                            <input type="date" id="leaveEndDate" class="form-control">
+                            <button class="btn btn-search" id="leaveSearchBtn">查询</button>
+                        </div>
+                    </div>
+
+                    <!-- 请假列表 -->
+                    <div class="leave-table-container">
+                        <table class="leave-table">
+                            <thead>
+                                <tr>
+                                    <th>申请时间</th>
+                                    <th>员工姓名</th>
+                                    <th>工号</th>
+                                    <th>部门</th>
+                                    <th>请假类型</th>
+                                    <th>开始日期</th>
+                                    <th>结束日期</th>
+                                    <th>天数</th>
+                                    <th>请假原因</th>
+                                    <th>状态</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="leaveBody">
+                                <tr>
+                                    <td colspan="11" class="loading">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination" id="leavePagination"></div>
+                </div>
+
+                <!-- 部门管理页面 -->
+                <div id="departmentsPage" class="page">
+                    <h2 class="page-title">部门管理</h2>
+                    
+                    <!-- 部门列表 -->
+                    <div class="departments-container">
+                        <div class="departments-list">
+                            <div class="departments-header">
+                                <h3>部门列表</h3>
+                                <button class="btn btn-primary" id="addDepartmentBtn">新增部门</button>
+                            </div>
+                            <div id="departmentsList" class="departments-grid">
+                                <!-- 部门卡片将在这里动态生成 -->
+                            </div>
+                        </div>
+                        
+                        <!-- 未分配部门的员工 -->
+                        <div class="unassigned-employees">
+                            <h3>未分配部门的员工</h3>
+                            <div id="unassignedEmployees" class="employees-list">
+                                <!-- 未分配员工将在这里显示 -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 数据导入页面 -->
+                <div id="importPage" class="page">
+                    <h2 class="page-title">数据导入</h2>
+                    
+                    <div class="import-container">
+                        <!-- 考勤机数据导入 -->
+                        <div class="import-card">
+                            <div class="import-header">
+                                <h3 class="import-title">📡 考勤机数据导入</h3>
+                                <p class="import-desc">连接中控考勤机，自动导入考勤数据</p>
+                            </div>
+                            <div class="import-content">
+                                <div class="device-config">
+                                    <div class="form-group">
+                                        <label>考勤机IP地址：</label>
+                                        <input type="text" id="deviceIp" class="form-control" placeholder="例如：192.168.1.100" value="192.168.1.100">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>端口：</label>
+                                        <input type="number" id="devicePort" class="form-control" placeholder="例如：4370" value="4370">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>用户名：</label>
+                                        <input type="text" id="deviceUser" class="form-control" placeholder="默认：admin" value="admin">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>密码：</label>
+                                        <input type="password" id="devicePassword" class="form-control" placeholder="默认：admin" value="admin">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>导入日期范围：</label>
+                                        <div class="date-range">
+                                            <input type="date" id="importStartDate" class="form-control">
+                                            <span>至</span>
+                                            <input type="date" id="importEndDate" class="form-control">
+                                        </div>
+                                    </div>
+                                    <div class="form-actions">
+                                        <button class="btn btn-primary" id="connectDeviceBtn">连接考勤机</button>
+                                        <button class="btn btn-success" id="importDeviceBtn" disabled>导入数据</button>
+                                    </div>
+                                    <div id="deviceStatus" class="device-status"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Excel数据导入 -->
+                        <div class="import-card">
+                            <div class="import-header">
+                                <h3 class="import-title">📊 Excel数据导入</h3>
+                                <p class="import-desc">通过Excel文件批量导入考勤数据</p>
+                            </div>
+                            <div class="import-content">
+                                <div class="excel-import-info">
+                                    <p class="info-text">如需使用Excel导入功能，请联系我们的销售人员获取技术支持。</p>
+                                    <button class="btn btn-primary" id="excelImportBtn">查看数据格式并联系销售</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Excel导入提示模态框 -->
+    <div id="excelImportModal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>Excel数据导入</h3>
+                <span class="modal-close" id="closeExcelImportModal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="contact-info">
+                    <h4>📞 联系方式</h4>
+                    <p><strong>销售经理：</strong>新联软件</p>
+                    <p><strong>联系电话：</strong><a href="tel:15305656999" style="color: #2196f3; text-decoration: none;">15305656999</a></p>
+                    <p class="contact-note">请致电或添加微信咨询Excel导入功能的使用方法和数据格式要求。</p>
+                </div>
+                
+                <div class="data-format">
+                    <h4>📋 Excel数据格式示例</h4>
+                    <p class="format-note">以下为考勤数据导入的标准格式，请确保您的Excel文件符合以下格式：</p>
+                    
+                    <div class="format-table-container">
+                        <table class="format-table">
+                            <thead>
+                                <tr>
+                                    <th>工号</th>
+                                    <th>姓名</th>
+                                    <th>打卡日期</th>
+                                    <th>上班时间</th>
+                                    <th>下班时间</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>E001</td>
+                                    <td>张三</td>
+                                    <td>2024-01-15</td>
+                                    <td>09:00:00</td>
+                                    <td>18:00:00</td>
+                                    <td>正常</td>
+                                </tr>
+                                <tr>
+                                    <td>E002</td>
+                                    <td>李四</td>
+                                    <td>2024-01-15</td>
+                                    <td>09:20:00</td>
+                                    <td>18:00:00</td>
+                                    <td>迟到</td>
+                                </tr>
+                                <tr>
+                                    <td>E003</td>
+                                    <td>王五</td>
+                                    <td>2024-01-15</td>
+                                    <td>09:00:00</td>
+                                    <td>17:30:00</td>
+                                    <td>早退</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="format-requirements">
+                        <h5>格式要求：</h5>
+                        <ul>
+                            <li><strong>工号：</strong>必须与系统中已存在的员工工号一致</li>
+                            <li><strong>姓名：</strong>员工姓名（可选，用于验证）</li>
+                            <li><strong>打卡日期：</strong>格式为 YYYY-MM-DD（如：2024-01-15）</li>
+                            <li><strong>上班时间：</strong>格式为 HH:MM:SS（如：09:00:00）</li>
+                            <li><strong>下班时间：</strong>格式为 HH:MM:SS（如：18:00:00）</li>
+                            <li><strong>状态：</strong>正常/迟到/早退（系统会根据时间自动判断，此列可选）</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="format-notes">
+                        <h5>注意事项：</h5>
+                        <ul>
+                            <li>第一行必须为表头，表头名称需与示例完全一致</li>
+                            <li>日期和时间格式必须严格按照要求填写</li>
+                            <li>工号必须存在于系统中，否则该行数据将被跳过</li>
+                            <li>建议单次导入不超过1000条记录</li>
+                            <li>导入前请备份现有数据</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="window.open('tel:15305656999')">拨打销售电话</button>
+                <button class="btn btn-cancel" id="closeExcelImportModalBtn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 请假申请/编辑模态框 -->
+    <div id="leaveModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">新增请假</h3>
+                <span class="modal-close" id="closeModal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="leaveForm">
+                    <input type="hidden" id="leaveId">
+                    <div class="form-group">
+                        <label for="leaveEmployeeSelect">员工：<span class="required">*</span></label>
+                        <select id="leaveEmployeeSelect" class="form-control" required>
+                            <option value="">请选择员工</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="leaveTypeSelect">请假类型：<span class="required">*</span></label>
+                        <select id="leaveTypeSelect" class="form-control" required>
+                            <option value="">请选择请假类型</option>
+                            <option value="事假">事假</option>
+                            <option value="病假">病假</option>
+                            <option value="年假">年假</option>
+                            <option value="调休">调休</option>
+                            <option value="婚假">婚假</option>
+                            <option value="产假">产假</option>
+                            <option value="陪产假">陪产假</option>
+                            <option value="丧假">丧假</option>
+                            <option value="其他">其他</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="leaveStartDateInput">开始日期：<span class="required">*</span></label>
+                        <input type="date" id="leaveStartDateInput" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="leaveEndDateInput">结束日期：<span class="required">*</span></label>
+                        <input type="date" id="leaveEndDateInput" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="leaveDays">请假天数：<span class="required">*</span></label>
+                        <input type="number" id="leaveDays" class="form-control" step="0.5" min="0.5" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="leaveReason">请假原因：<span class="required">*</span></label>
+                        <textarea id="leaveReason" class="form-control" rows="4" required placeholder="请详细说明请假原因"></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-cancel" id="cancelLeaveBtn">取消</button>
+                        <button type="submit" class="btn btn-save">提交</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 员工标签编辑模态框 -->
+    <div id="employeeTagModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑员工标签</h3>
+                <span class="modal-close" onclick="closeEmployeeTagModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p><strong>员工:</strong> <span id="tagEmployeeName"></span></p>
+                <div class="form-group">
+                    <label>选择标签（可多选）：</label>
+                    <div id="employeeTagCheckboxes" class="tag-checkboxes">
+                        <!-- 标签复选框将在这里动态生成 -->
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeEmployeeTagModal()">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="saveEmployeeTag()">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 部门编辑模态框 -->
+    <div id="departmentModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="departmentModalTitle">新增部门</h3>
+                <span class="modal-close" id="closeDepartmentModal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="departmentForm">
+                    <input type="hidden" id="departmentId">
+                    <div class="form-group">
+                        <label for="departmentName">部门名称：<span class="required">*</span></label>
+                        <input type="text" id="departmentName" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="departmentCode">部门代码：</label>
+                        <input type="text" id="departmentCode" class="form-control" placeholder="可选">
+                    </div>
+                    <div class="form-group">
+                        <label for="departmentDesc">部门描述：</label>
+                        <textarea id="departmentDesc" class="form-control" rows="3"></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-cancel" id="cancelDepartmentBtn">取消</button>
+                        <button type="submit" class="btn btn-save">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 审批模态框 -->
+    <div id="approveModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>审批请假申请</h3>
+                <span class="modal-close" id="closeApproveModal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="approveForm">
+                    <input type="hidden" id="approveLeaveId">
+                    <div class="form-group">
+                        <label>审批结果：<span class="required">*</span></label>
+                        <select id="approveStatus" class="form-control" required>
+                            <option value="approved">批准</option>
+                            <option value="rejected">拒绝</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="approveRemark">审批备注：</label>
+                        <textarea id="approveRemark" class="form-control" rows="3" placeholder="可选，填写审批意见"></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-cancel" id="cancelApproveBtn">取消</button>
+                        <button type="submit" class="btn btn-save">提交</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 通知容器 -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

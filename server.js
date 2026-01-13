@@ -42,21 +42,54 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// 测试数据库连接
-db.getConnection((err, connection) => {
-  if (err) {
-    console.error('数据库连接失败:', err);
-  } else {
-    // 设置连接字符集
-    connection.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci', (err) => {
-      if (err) {
-        console.error('设置字符集失败:', err);
+// 测试数据库连接（带重试）
+const dbType = require('./config/database').dbType;
+
+async function testDatabaseConnection() {
+  const maxRetries = 3;
+  let retries = 0;
+  
+  while (retries < maxRetries) {
+    try {
+      if (dbType === 'mysql') {
+        await new Promise((resolve, reject) => {
+          db.getConnection((err, connection) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            // MySQL 设置连接字符集
+            connection.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci', (err) => {
+              if (err) {
+                console.warn('设置字符集警告:', err.message);
+              }
+            });
+            console.log('✅ 数据库连接成功');
+            connection.release();
+            resolve();
+          });
+        });
+      } else {
+        // PostgreSQL 连接测试
+        await db.promise.query('SELECT NOW()');
+        console.log('✅ 数据库连接成功');
       }
-    });
-    console.log('数据库连接成功');
-    connection.release();
+      break; // 成功则退出循环
+    } catch (err) {
+      retries++;
+      if (retries < maxRetries) {
+        console.warn(`数据库连接失败，${2 * retries}秒后重试 (${retries}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, 2000 * retries));
+      } else {
+        console.error('❌ 数据库连接失败，已达到最大重试次数:', err.message);
+        console.warn('⚠️  服务器将继续启动，但数据库操作可能会失败');
+      }
+    }
   }
-});
+}
+
+// 异步测试连接（不阻塞服务器启动）
+testDatabaseConnection();
 
 app.listen(PORT, () => {
   console.log(`服务器运行在 http://localhost:${PORT}`);

@@ -30,8 +30,11 @@ router.post('/punch', async (req, res) => {
     const todayDate = now.format('YYYY-MM-DD');
 
     // 获取默认考勤规则
+    const dbType = require('../config/database').dbType;
+    const isDefaultValue = dbType === 'postgresql' ? true : 1;
     const [rules] = await db.promise.execute(
-      'SELECT * FROM attendance_rules WHERE is_default = 1 LIMIT 1'
+      'SELECT * FROM attendance_rules WHERE is_default = ? LIMIT 1',
+      [isDefaultValue]
     );
     
     let rule = {
@@ -231,7 +234,8 @@ router.get('/records', async (req, res) => {
     const pageNum = Number(page) || 1;
     const pageSizeNum = Number(pageSize) || 20;
     const offset = (pageNum - 1) * pageSizeNum;
-    query += ` LIMIT ${offset}, ${pageSizeNum}`;
+    // 使用 PostgreSQL 兼容的 LIMIT/OFFSET 语法（MySQL 也支持）
+    query += ` LIMIT ${pageSizeNum} OFFSET ${offset}`;
 
     const [records] = await db.promise.execute(query, params);
 

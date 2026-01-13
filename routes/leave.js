@@ -59,7 +59,8 @@ router.get('/', async (req, res) => {
     const pageNum = Number(page) || 1;
     const pageSizeNum = Number(pageSize) || 20;
     const offset = (pageNum - 1) * pageSizeNum;
-    query += ` LIMIT ${offset}, ${pageSizeNum}`;
+    // 使用 PostgreSQL 兼容的 LIMIT/OFFSET 语法（MySQL 也支持）
+    query += ` LIMIT ${pageSizeNum} OFFSET ${offset}`;
 
     const [requests] = await db.promise.execute(query, params);
 

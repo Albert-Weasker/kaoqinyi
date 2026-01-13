@@ -5,8 +5,11 @@ const db = require('../config/database');
 // 获取默认考勤规则
 router.get('/default', async (req, res) => {
   try {
+    const dbType = require('../config/database').dbType;
+    const isDefaultValue = dbType === 'postgresql' ? true : 1;
     const [rules] = await db.promise.execute(
-      'SELECT * FROM attendance_rules WHERE is_default = 1 LIMIT 1'
+      `SELECT * FROM attendance_rules WHERE is_default = ? LIMIT 1`,
+      [isDefaultValue]
     );
     
     if (rules.length === 0) {
@@ -72,26 +75,34 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const dbType = require('../config/database').dbType;
+    const trueValue = dbType === 'postgresql' ? true : 1;
+    const falseValue = dbType === 'postgresql' ? false : 0;
+    
     // 如果设置为默认规则，先取消其他默认规则
     if (is_default) {
       await db.promise.execute(
-        'UPDATE attendance_rules SET is_default = 0 WHERE is_default = 1'
+        'UPDATE attendance_rules SET is_default = ? WHERE is_default = ?',
+        [falseValue, trueValue]
       );
     }
 
     // 检查是否已存在默认规则
     const [existing] = await db.promise.execute(
-      'SELECT * FROM attendance_rules WHERE is_default = 1 LIMIT 1'
+      'SELECT * FROM attendance_rules WHERE is_default = ? LIMIT 1',
+      [trueValue]
     );
 
+    const isDefaultBool = is_default ? trueValue : falseValue;
+    
     if (existing.length > 0) {
       // 更新现有默认规则
       await db.promise.execute(
         `UPDATE attendance_rules 
          SET rule_name = ?, checkin_time = ?, checkin_late_time = ?, 
              checkout_time = ?, checkout_early_time = ?, is_default = ?
-         WHERE is_default = 1`,
-        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default ? 1 : 0]
+         WHERE is_default = ?`,
+        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool, trueValue]
       );
     } else {
       // 创建新规则
@@ -99,7 +110,7 @@ router.post('/', async (req, res) => {
         `INSERT INTO attendance_rules 
          (rule_name, checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default) 
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default ? 1 : 0]
+        [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool]
       );
     }
 
@@ -130,11 +141,16 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+    const dbType = require('../config/database').dbType;
+    const trueValue = dbType === 'postgresql' ? true : 1;
+    const falseValue = dbType === 'postgresql' ? false : 0;
+    const isDefaultBool = is_default ? trueValue : falseValue;
+    
     // 如果设置为默认规则，先取消其他默认规则
     if (is_default) {
       await db.promise.execute(
-        'UPDATE attendance_rules SET is_default = 0 WHERE is_default = 1 AND id != ?',
-        [id]
+        'UPDATE attendance_rules SET is_default = ? WHERE is_default = ? AND id != ?',
+        [falseValue, trueValue, id]
       );
     }
 
@@ -143,7 +159,7 @@ router.put('/:id', async (req, res) => {
        SET rule_name = ?, checkin_time = ?, checkin_late_time = ?, 
            checkout_time = ?, checkout_early_time = ?, is_default = ?
        WHERE id = ?`,
-      [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, is_default ? 1 : 0, id]
+      [rule_name || '默认规则', checkin_time, checkin_late_time, checkout_time, checkout_early_time, isDefaultBool, id]
     );
 
     res.json({

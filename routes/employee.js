@@ -100,9 +100,10 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     await db.promise.execute(
-      'INSERT INTO employees (name, employee_no, department_id, position, phone, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-      [name, employeeNo, departmentId || null, position || '', phone || '']
+      'INSERT INTO employees (name, employee_no, department_id, position, phone, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [name, employeeNo, departmentId || null, position || '', phone || '', now]
     );
 
     res.json({

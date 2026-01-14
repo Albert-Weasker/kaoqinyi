@@ -235,7 +235,31 @@ function switchPage(page) {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     
     // 显示目标页面
-    const targetPage = document.getElementById(`${page}Page`);
+    // 处理特殊页面ID（employee-stats -> employeeStatsPage）
+    let pageId = `${page}Page`;
+    if (page === 'employee-stats') {
+        pageId = 'employeeStatsPage';
+    } else if (page === 'home') {
+        pageId = 'homePage';
+    } else if (page === 'records') {
+        pageId = 'recordsPage';
+    } else if (page === 'leave') {
+        pageId = 'leavePage';
+    } else if (page === 'departments') {
+        pageId = 'departmentsPage';
+    } else if (page === 'employees') {
+        pageId = 'employeesPage';
+    } else if (page === 'stats') {
+        pageId = 'statsPage';
+    } else if (page === 'worktime') {
+        pageId = 'worktimePage';
+    } else if (page === 'rules') {
+        pageId = 'rulesPage';
+    } else if (page === 'import') {
+        pageId = 'importPage';
+    }
+    
+    const targetPage = document.getElementById(pageId);
     if (targetPage) {
         targetPage.classList.add('active');
     } else {
@@ -255,6 +279,7 @@ function switchPage(page) {
         'rules': '设置',
         'employees': '员工名单',
         'stats': '月度报表',
+        'employee-stats': '员工统计',
         'worktime': '工作时长',
         'leave': '请假审批',
         'departments': '部门设置',
@@ -274,6 +299,8 @@ function switchPage(page) {
         loadEmployeesPage();
     } else if (page === 'stats') {
         loadStatsPage();
+    } else if (page === 'employee-stats') {
+        loadEmployeeStatsPage();
     } else if (page === 'worktime') {
         loadWorktimePage();
     } else if (page === 'import') {
@@ -3085,3 +3112,418 @@ window.addEventListener('click', (e) => {
 // 暴露函数供HTML调用
 window.showExcelImportModal = showExcelImportModal;
 window.closeExcelImportModal = closeExcelImportModal;
+
+// ==================== 员工月度统计功能 ====================
+
+// 加载员工月度统计页面
+async function loadEmployeeStatsPage() {
+    // 设置默认月份为当前月份
+    const monthInput = document.getElementById('employeeStatsMonth');
+    if (monthInput && !monthInput.value) {
+        const now = new Date();
+        monthInput.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+    
+    // 加载部门和员工下拉框
+    await loadDepartmentsForEmployeeStats();
+    await loadEmployeesForEmployeeStats();
+    
+    // 绑定查询按钮
+    const searchBtn = document.getElementById('employeeStatsSearchBtn');
+    if (searchBtn && !searchBtn.hasAttribute('data-bound')) {
+        searchBtn.setAttribute('data-bound', 'true');
+        searchBtn.addEventListener('click', fetchEmployeeStats);
+    }
+    
+    // 绑定导出按钮
+    const exportBtn = document.getElementById('employeeStatsExportBtn');
+    if (exportBtn && !exportBtn.hasAttribute('data-bound')) {
+        exportBtn.setAttribute('data-bound', 'true');
+        exportBtn.addEventListener('click', exportEmployeeStats);
+    }
+    
+    // 绑定部门变化事件（更新员工列表）
+    const departmentSelect = document.getElementById('employeeStatsDepartment');
+    if (departmentSelect && !departmentSelect.hasAttribute('data-bound')) {
+        departmentSelect.setAttribute('data-bound', 'true');
+        departmentSelect.addEventListener('change', async () => {
+            await loadEmployeesForEmployeeStats();
+        });
+    }
+    
+    // 自动加载数据
+    await fetchEmployeeStats();
+}
+
+// 加载部门下拉框（员工统计页面）
+async function loadDepartmentsForEmployeeStats() {
+    const select = document.getElementById('employeeStatsDepartment');
+    if (!select) return;
+    
+    // 从缓存获取部门
+    const cached = frontendCache.get('departments');
+    if (cached && departments.length > 0) {
+        select.innerHTML = '<option value="">全部部门</option>';
+        departments.forEach(dept => {
+            const option = document.createElement('option');
+            option.value = dept.id;
+            option.textContent = dept.name;
+            select.appendChild(option);
+        });
+        return;
+    }
+    
+    // 如果缓存没有，从API加载
+    try {
+        const response = await fetch(`${API_BASE}/department`);
+        const result = await response.json();
+        if (result.success) {
+            departments = result.data;
+            frontendCache.set('departments', departments);
+            select.innerHTML = '<option value="">全部部门</option>';
+            departments.forEach(dept => {
+                const option = document.createElement('option');
+                option.value = dept.id;
+                option.textContent = dept.name;
+                select.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('加载部门失败:', error);
+    }
+}
+
+// 加载员工下拉框（员工统计页面）
+async function loadEmployeesForEmployeeStats() {
+    const select = document.getElementById('employeeStatsEmployee');
+    if (!select) return;
+    
+    const departmentId = document.getElementById('employeeStatsDepartment')?.value || '';
+    
+    // 从缓存获取员工（如果cacheStore可用）
+    let empList = [];
+    try {
+        if (typeof cacheStore !== 'undefined' && cacheStore.getAllEmployees) {
+            if (departmentId) {
+                empList = cacheStore.getEmployeesByCondition({ departmentId: parseInt(departmentId) });
+            } else {
+                empList = cacheStore.getAllEmployees();
+            }
+        }
+    } catch (e) {
+        // cacheStore可能未定义，使用API
+    }
+    
+    // 如果缓存没有，从API加载
+    if (empList.length === 0) {
+        try {
+            const params = new URLSearchParams();
+            if (departmentId) params.append('departmentId', departmentId);
+            const response = await fetch(`${API_BASE}/employee?${params}`);
+            const result = await response.json();
+            if (result.success) {
+                empList = result.data;
+            }
+        } catch (error) {
+            console.error('加载员工失败:', error);
+        }
+    }
+    
+    select.innerHTML = '<option value="">全部员工</option>';
+    empList.forEach(emp => {
+        const option = document.createElement('option');
+        option.value = emp.id;
+        option.textContent = `${emp.name} (${emp.employee_no})`;
+        select.appendChild(option);
+    });
+}
+
+// 获取员工月度统计
+async function fetchEmployeeStats() {
+    const month = document.getElementById('employeeStatsMonth')?.value || '';
+    const departmentId = document.getElementById('employeeStatsDepartment')?.value || '';
+    const employeeId = document.getElementById('employeeStatsEmployee')?.value || '';
+    
+    if (!month) {
+        showError('请选择月份');
+        return;
+    }
+    
+    const tbody = document.getElementById('employeeStatsTableBody');
+    if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 20px;">加载中...</td></tr>';
+    }
+    
+    try {
+        const params = new URLSearchParams();
+        params.append('month', month);
+        if (departmentId) params.append('departmentId', departmentId);
+        if (employeeId) params.append('employeeId', employeeId);
+        
+        // 先检查缓存
+        const cacheKey = `employee-monthly-stats_${month}_${departmentId}_${employeeId}`;
+        const cached = frontendCache.get(cacheKey);
+        if (cached) {
+            renderEmployeeStats(cached);
+            // 后台静默更新
+            fetchEmployeeStatsFromAPI(cacheKey, params).catch(() => {});
+            return;
+        }
+        
+        await fetchEmployeeStatsFromAPI(cacheKey, params);
+    } catch (error) {
+        console.error('获取员工月度统计失败:', error);
+        showError('加载数据失败，请稍后重试');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 20px; color: #f00;">加载失败</td></tr>';
+        }
+    }
+}
+
+// 从API获取员工月度统计
+async function fetchEmployeeStatsFromAPI(cacheKey, params) {
+    const response = await fetch(`${API_BASE}/attendance/employee-monthly-stats?${params}`);
+    const result = await response.json();
+    
+    if (result.success) {
+        const data = result.data;
+        // 保存到缓存
+        frontendCache.set(cacheKey, data);
+        renderEmployeeStats(data);
+    } else {
+        throw new Error(result.message || '加载失败');
+    }
+}
+
+// 渲染员工月度统计
+function renderEmployeeStats(data) {
+    const tbody = document.getElementById('employeeStatsTableBody');
+    const summaryDiv = document.getElementById('employeeStatsSummary');
+    
+    if (!tbody) return;
+    
+    if (!data.stats || data.stats.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; padding: 20px; color: #999;">暂无数据</td></tr>';
+        if (summaryDiv) summaryDiv.style.display = 'none';
+        return;
+    }
+    
+    // 显示汇总统计
+    if (summaryDiv && data.summary) {
+        document.getElementById('totalEmployeesCount').textContent = data.summary.total_employees;
+        document.getElementById('totalLateCount').textContent = data.summary.total_late;
+        document.getElementById('totalEarlyCount').textContent = data.summary.total_early;
+        document.getElementById('totalAbsentCount').textContent = data.summary.total_absent;
+        document.getElementById('totalLeaveCount').textContent = data.summary.total_leave;
+        summaryDiv.style.display = 'flex';
+    }
+    
+    // 渲染表格
+    tbody.innerHTML = '';
+    data.stats.forEach((stat, index) => {
+        const tr = document.createElement('tr');
+        tr.className = 'employee-stats-row';
+        tr.innerHTML = `
+            <td>
+                <a href="javascript:void(0)" class="link-detail" onclick="showEmployeeDetail(${index})">查看详情</a>
+            </td>
+            <td><strong>${stat.employee_no}</strong></td>
+            <td>${stat.employee_name}</td>
+            <td>${stat.department}</td>
+            <td>${stat.position || '-'}</td>
+            <td><span class="stat-badge stat-normal">${stat.normal_count}</span></td>
+            <td>
+                ${stat.late_count > 0 ? `<span class="stat-badge stat-late" title="${stat.late_count}次迟到">${stat.late_count}</span>` : '<span class="stat-badge">0</span>'}
+            </td>
+            <td>
+                ${stat.early_count > 0 ? `<span class="stat-badge stat-early" title="${stat.early_count}次早退">${stat.early_count}</span>` : '<span class="stat-badge">0</span>'}
+            </td>
+            <td>
+                ${stat.absent_count > 0 ? `<span class="stat-badge stat-absent" title="${stat.absent_count}天未到">${stat.absent_count}</span>` : '<span class="stat-badge">0</span>'}
+            </td>
+            <td><span class="stat-badge stat-leave">${stat.leave_count}</span></td>
+            <td><strong>${stat.work_days}</strong></td>
+            <td>${stat.total_days}</td>
+        `;
+        tr.setAttribute('data-stat-index', index);
+        tbody.appendChild(tr);
+    });
+    
+    // 保存数据到全局变量，供详情查看使用
+    window.employeeStatsData = data;
+}
+
+// 显示员工详情
+function showEmployeeDetail(index) {
+    const data = window.employeeStatsData;
+    if (!data || !data.stats || !data.stats[index]) return;
+    
+    const stat = data.stats[index];
+    const modal = document.getElementById('employeeDetailModal');
+    const title = document.getElementById('employeeDetailTitle');
+    const content = document.getElementById('employeeDetailContent');
+    
+    title.textContent = `${stat.employee_name} (${stat.employee_no}) - ${stat.month} 考勤详情`;
+    
+    let html = `
+        <div class="employee-detail-header">
+            <div class="detail-info-item">
+                <span class="label">部门：</span>
+                <span class="value">${stat.department}</span>
+            </div>
+            <div class="detail-info-item">
+                <span class="label">职位：</span>
+                <span class="value">${stat.position || '-'}</span>
+            </div>
+        </div>
+    `;
+    
+    // 迟到详情
+    if (stat.late_details && stat.late_details.length > 0) {
+        html += `
+            <div class="detail-section">
+                <h4 class="detail-section-title">📅 迟到记录 (${stat.late_count}次)</h4>
+                <div class="detail-list">
+        `;
+        stat.late_details.forEach(item => {
+            const date = moment(item.date).format('MM月DD日');
+            const time = moment(item.punch_time).format('HH:mm');
+            html += `
+                <div class="detail-item detail-late">
+                    <span class="detail-date">${date}</span>
+                    <span class="detail-time">${time}</span>
+                    <span class="detail-minutes">迟到 ${item.minutes} 分钟</span>
+                </div>
+            `;
+        });
+        html += `</div></div>`;
+    }
+    
+    // 早退详情
+    if (stat.early_details && stat.early_details.length > 0) {
+        html += `
+            <div class="detail-section">
+                <h4 class="detail-section-title">📅 早退记录 (${stat.early_count}次)</h4>
+                <div class="detail-list">
+        `;
+        stat.early_details.forEach(item => {
+            const date = moment(item.date).format('MM月DD日');
+            const time = moment(item.punch_time).format('HH:mm');
+            html += `
+                <div class="detail-item detail-early">
+                    <span class="detail-date">${date}</span>
+                    <span class="detail-time">${time}</span>
+                    <span class="detail-minutes">早退 ${item.minutes} 分钟</span>
+                </div>
+            `;
+        });
+        html += `</div></div>`;
+    }
+    
+    // 未到详情
+    if (stat.absent_details && stat.absent_details.length > 0) {
+        html += `
+            <div class="detail-section">
+                <h4 class="detail-section-title">📅 未到记录 (${stat.absent_count}天)</h4>
+                <div class="detail-list">
+        `;
+        stat.absent_details.forEach(item => {
+            const date = moment(item.date).format('MM月DD日');
+            html += `
+                <div class="detail-item detail-absent">
+                    <span class="detail-date">${date}</span>
+                    <span class="detail-status">未到</span>
+                </div>
+            `;
+        });
+        html += `</div></div>`;
+    }
+    
+    // 请假详情
+    if (stat.leave_details && stat.leave_details.length > 0) {
+        html += `
+            <div class="detail-section">
+                <h4 class="detail-section-title">📅 请假记录 (${stat.leave_count}天)</h4>
+                <div class="detail-list">
+        `;
+        stat.leave_details.forEach(item => {
+            const date = moment(item.date).format('MM月DD日');
+            html += `
+                <div class="detail-item detail-leave">
+                    <span class="detail-date">${date}</span>
+                    <span class="detail-type">${item.type || '请假'}</span>
+                </div>
+            `;
+        });
+        html += `</div></div>`;
+    }
+    
+    // 如果没有异常记录
+    if (!stat.late_details?.length && !stat.early_details?.length && !stat.absent_details?.length && !stat.leave_details?.length) {
+        html += `<div class="detail-section"><p style="text-align: center; color: #999; padding: 20px;">本月无异常记录</p></div>`;
+    }
+    
+    content.innerHTML = html;
+    modal.style.display = 'block';
+    
+    // 绑定关闭事件
+    const closeBtn = document.getElementById('closeEmployeeDetail');
+    if (closeBtn && !closeBtn.hasAttribute('data-bound')) {
+        closeBtn.setAttribute('data-bound', 'true');
+        closeBtn.addEventListener('click', () => {
+            modal.style.display = 'none';
+        });
+    }
+    
+    // 点击模态框外部关闭
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.style.display = 'none';
+        }
+    });
+}
+
+// 暴露函数供HTML调用
+window.showEmployeeDetail = showEmployeeDetail;
+
+// 导出员工月度统计
+async function exportEmployeeStats() {
+    const month = document.getElementById('employeeStatsMonth')?.value || '';
+    const departmentId = document.getElementById('employeeStatsDepartment')?.value || '';
+    const employeeId = document.getElementById('employeeStatsEmployee')?.value || '';
+    
+    if (!month) {
+        showError('请先选择月份并查询数据');
+        return;
+    }
+    
+    try {
+        showInfo('正在导出，请稍候...');
+        
+        const params = new URLSearchParams();
+        params.append('month', month);
+        if (departmentId) params.append('departmentId', departmentId);
+        if (employeeId) params.append('employeeId', employeeId);
+        
+        const response = await fetch(`${API_BASE}/attendance/export/employee-monthly-stats?${params}`);
+        
+        if (!response.ok) {
+            throw new Error('导出失败');
+        }
+        
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `员工月度统计_${month}_${moment().format('YYYYMMDD_HHmmss')}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        
+        showSuccess('导出成功！');
+    } catch (error) {
+        console.error('导出失败:', error);
+        showError('导出失败，请稍后重试');
+    }
+}

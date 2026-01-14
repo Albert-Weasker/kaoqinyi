@@ -50,6 +50,10 @@
                     <span class="nav-icon">📊</span>
                     <span class="nav-text">月度报表</span>
                 </a>
+                <a href="#employee-stats" class="nav-item" data-page="employee-stats">
+                    <span class="nav-icon">👥</span>
+                    <span class="nav-text">员工统计</span>
+                </a>
                 <a href="#worktime" class="nav-item" data-page="worktime">
                     <span class="nav-icon">⏱️</span>
                     <span class="nav-text">工作时长</span>
@@ -371,6 +375,93 @@
                                 <tbody id="worktimeDetailsTableBody">
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 员工月度统计页面 -->
+                <div id="employeeStatsPage" class="page">
+                    <h2 class="page-title">员工月度统计</h2>
+                    
+                    <!-- 筛选条件 -->
+                    <div class="stats-filters">
+                        <div class="filter-group">
+                            <label>月份：</label>
+                            <input type="month" id="employeeStatsMonth" class="form-control" value="">
+                            <label style="margin-left: 20px;">部门：</label>
+                            <select id="employeeStatsDepartment" class="form-control">
+                                <option value="">全部部门</option>
+                            </select>
+                            <label style="margin-left: 20px;">员工：</label>
+                            <select id="employeeStatsEmployee" class="form-control">
+                                <option value="">全部员工</option>
+                            </select>
+                            <button class="btn btn-search" id="employeeStatsSearchBtn" style="margin-left: 20px;">查询</button>
+                            <button class="btn btn-export" id="employeeStatsExportBtn" style="margin-left: 10px;">📥 导出Excel</button>
+                        </div>
+                    </div>
+                    
+                    <!-- 汇总统计 -->
+                    <div id="employeeStatsSummary" class="employee-stats-summary" style="display: none;">
+                        <div class="summary-card">
+                            <div class="summary-label">总员工数</div>
+                            <div class="summary-value" id="totalEmployeesCount">0</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-label">总迟到次数</div>
+                            <div class="summary-value" id="totalLateCount">0</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-label">总早退次数</div>
+                            <div class="summary-value" id="totalEarlyCount">0</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-label">总未到天数</div>
+                            <div class="summary-value" id="totalAbsentCount">0</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-label">总请假天数</div>
+                            <div class="summary-value" id="totalLeaveCount">0</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 统计表格 -->
+                    <div class="table-container employee-stats-table-container" style="margin-top: 20px;">
+                        <table class="data-table employee-stats-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 60px;">操作</th>
+                                    <th>工号</th>
+                                    <th>姓名</th>
+                                    <th>部门</th>
+                                    <th>职位</th>
+                                    <th>正常天数</th>
+                                    <th>迟到次数</th>
+                                    <th>早退次数</th>
+                                    <th>未到天数</th>
+                                    <th>请假天数</th>
+                                    <th>工作天数</th>
+                                    <th>总天数</th>
+                                </tr>
+                            </thead>
+                            <tbody id="employeeStatsTableBody">
+                                <tr>
+                                    <td colspan="12" style="text-align: center; padding: 20px; color: #999;">请选择月份并点击查询</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 员工详情模态框 -->
+                <div id="employeeDetailModal" class="modal" style="display: none;">
+                    <div class="modal-content employee-detail-modal">
+                        <div class="modal-header">
+                            <h3 id="employeeDetailTitle">员工考勤详情</h3>
+                            <span class="close" id="closeEmployeeDetail">&times;</span>
+                        </div>
+                        <div class="modal-body">
+                            <div id="employeeDetailContent"></div>
                         </div>
                     </div>
                 </div>

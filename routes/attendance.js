@@ -217,100 +217,84 @@ router.post('/punch', async (req, res) => {
   }
 });
 
-// 获取打卡记录
+// 获取打卡记录（基于缓存）
 router.get('/records', async (req, res) => {
   try {
     const { employeeId, startDate, endDate, status, page = 1, pageSize = 20 } = req.query;
     
-    let query = `
-      SELECT 
-        a.*,
-        e.name as employee_name,
-        e.employee_no,
-        d.name as department
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      LEFT JOIN departments d ON e.department_id = d.id
-      WHERE 1=1
-    `;
-    const params = [];
-
+    // 从缓存获取员工列表
+    let employeeIds = [];
     if (employeeId) {
-      // 支持多个员工ID（逗号分隔）
       if (employeeId.includes(',')) {
-        const ids = employeeId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-        if (ids.length > 0) {
-          query += ` AND a.employee_id IN (${ids.map(() => '?').join(',')})`;
-          params.push(...ids);
-        }
+        employeeIds = employeeId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
       } else {
-        query += ' AND a.employee_id = ?';
-        params.push(parseInt(employeeId));
+        employeeIds = [parseInt(employeeId)];
       }
+    } else {
+      employeeIds = cacheStore.getAllEmployees().map(emp => emp.id);
     }
 
-    if (startDate) {
-      query += ' AND DATE(a.punch_time) >= ?';
-      params.push(startDate);
+    // 从缓存获取考勤记录
+    const allRecords = [];
+    const start = startDate ? moment(startDate) : moment().subtract(30, 'days');
+    const end = endDate ? moment(endDate) : moment();
+    
+    for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+      const dateKey = d.format('YYYY-MM-DD');
+      employeeIds.forEach(empId => {
+        const attendance = cacheStore.getAttendance(empId, dateKey);
+        if (attendance) {
+          const emp = cacheStore.getEmployee(empId);
+          if (!emp) return;
+          
+          // 添加checkin记录
+          attendance.checkins.forEach(checkin => {
+            if (!status || checkin.status === status) {
+              allRecords.push({
+                id: null, // 缓存中没有ID
+                employee_id: empId,
+                type: 'checkin',
+                punch_time: checkin.punch_time,
+                status: checkin.status,
+                late_minutes: checkin.late_minutes || 0,
+                early_minutes: 0,
+                employee_name: emp.name,
+                employee_no: emp.employee_no,
+                department: emp.department_name || '未分配'
+              });
+            }
+          });
+          
+          // 添加checkout记录
+          attendance.checkouts.forEach(checkout => {
+            if (!status || checkout.status === status) {
+              allRecords.push({
+                id: null,
+                employee_id: empId,
+                type: 'checkout',
+                punch_time: checkout.punch_time,
+                status: checkout.status,
+                late_minutes: 0,
+                early_minutes: checkout.early_minutes || 0,
+                employee_name: emp.name,
+                employee_no: emp.employee_no,
+                department: emp.department_name || '未分配'
+              });
+            }
+          });
+        }
+      });
     }
-
-    if (endDate) {
-      query += ' AND DATE(a.punch_time) <= ?';
-      params.push(endDate);
-    }
-
-    if (status) {
-      query += ' AND a.status = ?';
-      params.push(status);
-    }
-
-    query += ' ORDER BY a.punch_time DESC';
-
+    
+    // 按时间倒序排序
+    allRecords.sort((a, b) => moment(b.punch_time).diff(moment(a.punch_time)));
+    
     // 分页
     const pageNum = Number(page) || 1;
     const pageSizeNum = Number(pageSize) || 20;
     const offset = (pageNum - 1) * pageSizeNum;
-    // 使用 PostgreSQL 兼容的 LIMIT/OFFSET 语法（MySQL 也支持）
-    query += ` LIMIT ${pageSizeNum} OFFSET ${offset}`;
-
-    const [records] = await db.promise.execute(query, params);
-
-    // 获取总数
-    let countQuery = `
-      SELECT COUNT(*) as total
-      FROM attendance a
-      WHERE 1=1
-    `;
-    const countParams = [];
-    
-    if (employeeId) {
-      // 支持多个员工ID（逗号分隔）
-      if (employeeId.includes(',')) {
-        const ids = employeeId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-        if (ids.length > 0) {
-          countQuery += ` AND a.employee_id IN (${ids.map(() => '?').join(',')})`;
-          countParams.push(...ids);
-        }
-      } else {
-        countQuery += ' AND a.employee_id = ?';
-        countParams.push(parseInt(employeeId));
-      }
-    }
-    if (startDate) {
-      countQuery += ' AND DATE(a.punch_time) >= ?';
-      countParams.push(startDate);
-    }
-    if (endDate) {
-      countQuery += ' AND DATE(a.punch_time) <= ?';
-      countParams.push(endDate);
-    }
-    if (status) {
-      countQuery += ' AND a.status = ?';
-      countParams.push(status);
-    }
-
-    const [countResult] = await db.promise.execute(countQuery, countParams);
-    const total = countResult[0].total;
+    const total = allRecords.length;
+    const records = allRecords.slice(offset, offset + pageSizeNum);
 
     res.json({
       success: true,
@@ -490,56 +474,77 @@ router.get('/today-stats', async (req, res) => {
   }
 });
 
-// 导出考勤记录（Excel）
+// 导出考勤记录（Excel，基于缓存）
 router.get('/export/excel', async (req, res) => {
   try {
     const { employeeId, startDate, endDate, status } = req.query;
     
-    // 构建查询（与records接口相同的逻辑）
-    let query = `
-      SELECT 
-        a.*,
-        e.name as employee_name,
-        e.employee_no,
-        d.name as department
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      LEFT JOIN departments d ON e.department_id = d.id
-      WHERE 1=1
-    `;
-    const params = [];
-
+    // 从缓存获取员工列表
+    let employeeIds = [];
     if (employeeId) {
       if (employeeId.includes(',')) {
-        const ids = employeeId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-        if (ids.length > 0) {
-          query += ` AND a.employee_id IN (${ids.map(() => '?').join(',')})`;
-          params.push(...ids);
-        }
+        employeeIds = employeeId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
       } else {
-        query += ' AND a.employee_id = ?';
-        params.push(parseInt(employeeId));
+        employeeIds = [parseInt(employeeId)];
       }
+    } else {
+      employeeIds = cacheStore.getAllEmployees().map(emp => emp.id);
     }
 
-    if (startDate) {
-      query += ' AND DATE(a.punch_time) >= ?';
-      params.push(startDate);
+    // 从缓存获取考勤记录
+    const allRecords = [];
+    const start = startDate ? moment(startDate) : moment().subtract(30, 'days');
+    const end = endDate ? moment(endDate) : moment();
+    
+    for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+      const dateKey = d.format('YYYY-MM-DD');
+      employeeIds.forEach(empId => {
+        const attendance = cacheStore.getAttendance(empId, dateKey);
+        if (attendance) {
+          const emp = cacheStore.getEmployee(empId);
+          if (!emp) return;
+          
+          // 添加checkin记录
+          attendance.checkins.forEach(checkin => {
+            if (!status || checkin.status === status) {
+              allRecords.push({
+                employee_id: empId,
+                type: 'checkin',
+                punch_time: checkin.punch_time,
+                status: checkin.status,
+                late_minutes: checkin.late_minutes || 0,
+                early_minutes: 0,
+                employee_name: emp.name,
+                employee_no: emp.employee_no,
+                department: emp.department_name || '未分配'
+              });
+            }
+          });
+          
+          // 添加checkout记录
+          attendance.checkouts.forEach(checkout => {
+            if (!status || checkout.status === status) {
+              allRecords.push({
+                employee_id: empId,
+                type: 'checkout',
+                punch_time: checkout.punch_time,
+                status: checkout.status,
+                late_minutes: 0,
+                early_minutes: checkout.early_minutes || 0,
+                employee_name: emp.name,
+                employee_no: emp.employee_no,
+                department: emp.department_name || '未分配'
+              });
+            }
+          });
+        }
+      });
     }
-
-    if (endDate) {
-      query += ' AND DATE(a.punch_time) <= ?';
-      params.push(endDate);
-    }
-
-    if (status) {
-      query += ' AND a.status = ?';
-      params.push(status);
-    }
-
-    query += ' ORDER BY a.punch_time DESC';
-
-    const [records] = await db.promise.execute(query, params);
+    
+    // 按时间倒序排序
+    allRecords.sort((a, b) => moment(b.punch_time).diff(moment(a.punch_time)));
+    
+    const records = allRecords;
 
     // 准备Excel数据
     const excelData = records.map(record => ({
@@ -718,7 +723,7 @@ router.get('/export/word', async (req, res) => {
   }
 });
 
-// 获取统计数据
+// 获取统计数据（基于缓存）
 router.get('/stats', async (req, res) => {
   try {
     const { startDate, endDate, departmentId } = req.query;
@@ -736,130 +741,127 @@ router.get('/stats', async (req, res) => {
       });
     }
     
-    // 构建基础查询条件
-    let whereConditions = [];
-    const params = [];
-    
-    // 优化：使用日期范围查询而不是 DATE() 函数，提高性能
-    const dateExpr = getDateExpr('a.punch_time');
-    
-    if (startDate) {
-      whereConditions.push(`${dateExpr} >= ?`);
-      params.push(startDate);
-    }
-    
-    if (endDate) {
-      whereConditions.push(`${dateExpr} <= ?`);
-      params.push(endDate);
-    }
-    
+    // 从缓存获取员工列表
+    let employees = [];
     if (departmentId) {
-      whereConditions.push('e.department_id = ?');
-      params.push(departmentId);
+      employees = cacheStore.getEmployeesByCondition({ departmentId: parseInt(departmentId) });
+    } else {
+      employees = cacheStore.getAllEmployees();
     }
     
-    const whereClause = whereConditions.length > 0 
-      ? 'WHERE ' + whereConditions.join(' AND ')
-      : '';
+    const start = startDate ? moment(startDate) : moment().subtract(30, 'days');
+    const end = endDate ? moment(endDate) : moment();
     
-    // 1. 每日考勤趋势（优化：使用日期表达式）
-    const dailyTrendQuery = `
-      SELECT 
-        ${dateExpr} as date,
-        COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
-        COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(CASE WHEN a.status = 'early' THEN 1 END) as early_count
-      FROM attendance a
-      ${departmentId ? 'LEFT JOIN employees e ON a.employee_id = e.id' : ''}
-      ${whereClause}
-      GROUP BY ${dateExpr}
-      ORDER BY date ASC
-    `;
-    
+    // 1. 每日考勤趋势
+    const dailyTrendMap = new Map();
     // 2. 部门考勤统计
-    const departmentStatsQuery = `
-      SELECT 
-        COALESCE(d.name, '未分配') as department_name,
-        COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
-        COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(CASE WHEN a.status = 'early' THEN 1 END) as early_count
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      LEFT JOIN departments d ON e.department_id = d.id
-      ${whereClause}
-      GROUP BY d.id, d.name
-      ORDER BY checkin_count DESC
-    `;
-    
+    const departmentStatsMap = new Map();
     // 3. 考勤状态分布
-    const statusStatsQuery = `
-      SELECT 
-        a.status,
-        COUNT(*) as count
-      FROM attendance a
-      ${departmentId ? 'LEFT JOIN employees e ON a.employee_id = e.id' : ''}
-      ${whereClause}
-      GROUP BY a.status
-    `;
-    
+    const statusStatsMap = new Map();
     // 4. 迟到早退统计（按员工）
-    const dbType = require('../config/database').dbType;
-    // PostgreSQL 的 HAVING 子句不能直接使用别名，需要重复表达式
-    const lateCountExpr = "COUNT(CASE WHEN a.status = 'late' THEN 1 END)";
-    const earlyCountExpr = "COUNT(CASE WHEN a.status = 'early' THEN 1 END)";
-    const abnormalStatsQuery = `
-      SELECT 
-        e.name as employee_name,
-        e.employee_no,
-        ${lateCountExpr} as late_count,
-        ${earlyCountExpr} as early_count,
-        SUM(CASE WHEN a.status = 'late' THEN a.late_minutes ELSE 0 END) as total_late_minutes,
-        SUM(CASE WHEN a.status = 'early' THEN a.early_minutes ELSE 0 END) as total_early_minutes
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      ${whereClause}
-      GROUP BY a.employee_id, e.name, e.employee_no
-      HAVING ${lateCountExpr} > 0 OR ${earlyCountExpr} > 0
-      ORDER BY (${lateCountExpr} + ${earlyCountExpr}) DESC
-      LIMIT 10
-    `;
-    
+    const abnormalStatsMap = new Map();
     // 5. 月度考勤汇总
-    // MySQL 使用 DATE_FORMAT，PostgreSQL 使用 TO_CHAR
-    const monthExpr = dbType === 'postgresql' 
-      ? "TO_CHAR(a.punch_time, 'YYYY-MM')"
-      : "DATE_FORMAT(a.punch_time, '%Y-%m')";
-    const monthlyStatsQuery = `
-      SELECT 
-        ${monthExpr} as month,
-        COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
-        COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(CASE WHEN a.status = 'early' THEN 1 END) as early_count
-      FROM attendance a
-      ${departmentId ? 'LEFT JOIN employees e ON a.employee_id = e.id' : ''}
-      ${whereClause}
-      GROUP BY ${monthExpr}
-      ORDER BY month ASC
-    `;
+    const monthlyStatsMap = new Map();
     
-    // 并行执行所有查询以提高性能
-    const [dailyTrend, departmentStats, statusStats, abnormalStats, monthlyStats] = await Promise.all([
-      db.promise.execute(dailyTrendQuery, params),
-      db.promise.execute(departmentStatsQuery, params),
-      db.promise.execute(statusStatsQuery, params),
-      db.promise.execute(abnormalStatsQuery, params),
-      db.promise.execute(monthlyStatsQuery, params)
-    ]);
+    // 遍历所有员工和日期，从缓存统计
+    for (const emp of employees) {
+      const empAbnormal = {
+        employee_name: emp.name,
+        employee_no: emp.employee_no,
+        late_count: 0,
+        early_count: 0,
+        total_late_minutes: 0,
+        total_early_minutes: 0
+      };
+      
+      for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+        const dateKey = d.format('YYYY-MM-DD');
+        const monthKey = d.format('YYYY-MM');
+        const attendance = cacheStore.getAttendance(emp.id, dateKey);
+        
+        if (attendance) {
+          // 每日统计
+          if (!dailyTrendMap.has(dateKey)) {
+            dailyTrendMap.set(dateKey, { date: dateKey, checkin_count: 0, checkout_count: 0, late_count: 0, early_count: 0 });
+          }
+          const daily = dailyTrendMap.get(dateKey);
+          
+          // 部门统计
+          const deptName = emp.department_name || '未分配';
+          if (!departmentStatsMap.has(deptName)) {
+            departmentStatsMap.set(deptName, { department_name: deptName, checkin_count: 0, checkout_count: 0, late_count: 0, early_count: 0 });
+          }
+          const dept = departmentStatsMap.get(deptName);
+          
+          // 月度统计
+          if (!monthlyStatsMap.has(monthKey)) {
+            monthlyStatsMap.set(monthKey, { month: monthKey, checkin_count: 0, checkout_count: 0, late_count: 0, early_count: 0 });
+          }
+          const monthly = monthlyStatsMap.get(monthKey);
+          
+          // 处理checkin
+          attendance.checkins.forEach(checkin => {
+            daily.checkin_count++;
+            dept.checkin_count++;
+            monthly.checkin_count++;
+            
+            if (checkin.status === 'late') {
+              daily.late_count++;
+              dept.late_count++;
+              monthly.late_count++;
+              empAbnormal.late_count++;
+              empAbnormal.total_late_minutes += (checkin.late_minutes || 0);
+            }
+            
+            if (!statusStatsMap.has(checkin.status)) {
+              statusStatsMap.set(checkin.status, { status: checkin.status, count: 0 });
+            }
+            statusStatsMap.get(checkin.status).count++;
+          });
+          
+          // 处理checkout
+          attendance.checkouts.forEach(checkout => {
+            daily.checkout_count++;
+            dept.checkout_count++;
+            monthly.checkout_count++;
+            
+            if (checkout.status === 'early') {
+              daily.early_count++;
+              dept.early_count++;
+              monthly.early_count++;
+              empAbnormal.early_count++;
+              empAbnormal.total_early_minutes += (checkout.early_minutes || 0);
+            }
+            
+            if (!statusStatsMap.has(checkout.status)) {
+              statusStatsMap.set(checkout.status, { status: checkout.status, count: 0 });
+            }
+            statusStatsMap.get(checkout.status).count++;
+          });
+        }
+      }
+      
+      // 记录异常员工
+      if (empAbnormal.late_count > 0 || empAbnormal.early_count > 0) {
+        abnormalStatsMap.set(emp.id, empAbnormal);
+      }
+    }
+    
+    // 转换为数组并排序
+    const dailyTrend = Array.from(dailyTrendMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    const departmentStats = Array.from(departmentStatsMap.values()).sort((a, b) => b.checkin_count - a.checkin_count);
+    const statusStats = Array.from(statusStatsMap.values());
+    const abnormalStats = Array.from(abnormalStatsMap.values())
+      .sort((a, b) => (b.late_count + b.early_count) - (a.late_count + a.early_count))
+      .slice(0, 10);
+    const monthlyStats = Array.from(monthlyStatsMap.values()).sort((a, b) => a.month.localeCompare(b.month));
     
     const resultData = {
-      dailyTrend: dailyTrend[0],
-      departmentStats: departmentStats[0],
-      statusStats: statusStats[0],
-      abnormalStats: abnormalStats[0],
-      monthlyStats: monthlyStats[0]
+      dailyTrend,
+      departmentStats,
+      statusStats,
+      abnormalStats,
+      monthlyStats
     };
     
     // 缓存结果（5分钟）
@@ -1709,6 +1711,375 @@ router.get('/worktime', async (req, res) => {
       success: false,
       message: '服务器错误',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// 获取员工月度统计（基于缓存）
+router.get('/employee-monthly-stats', async (req, res) => {
+  try {
+    const { month, departmentId, employeeId } = req.query;
+    
+    // 默认当前月份
+    const targetMonth = month || moment().format('YYYY-MM');
+    const startDate = `${targetMonth}-01`;
+    const endDate = moment(startDate).endOf('month').format('YYYY-MM-DD');
+    
+    // 生成缓存键
+    const cacheKey = cache.generateKey('employee-monthly-stats', { month: targetMonth, departmentId, employeeId });
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    // 从缓存获取员工列表
+    let employees = [];
+    if (employeeId) {
+      const emp = cacheStore.getEmployee(parseInt(employeeId));
+      if (emp) employees = [emp];
+    } else if (departmentId) {
+      employees = cacheStore.getEmployeesByCondition({ departmentId: parseInt(departmentId) });
+    } else {
+      employees = cacheStore.getAllEmployees();
+    }
+    
+    if (employees.length === 0) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+    
+    const employeeIds = employees.map(emp => emp.id);
+    const stats = [];
+    
+    // 从缓存获取考勤记录和请假记录
+    const start = moment(startDate);
+    const end = moment(endDate);
+    
+    for (const emp of employees) {
+      let lateCount = 0;
+      let earlyCount = 0;
+      let normalCount = 0;
+      let absentCount = 0;
+      let leaveCount = 0;
+      let workDays = 0;
+      const leaveDetails = [];
+      const lateDetails = []; // 迟到详情：日期、分钟数
+      const earlyDetails = []; // 早退详情：日期、分钟数
+      const absentDetails = []; // 未到详情：日期
+      
+      // 统计每天的考勤
+      for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+        const dateKey = d.format('YYYY-MM-DD');
+        const dayOfWeek = d.day();
+        const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+        
+        const attendance = cacheStore.getAttendance(emp.id, dateKey);
+        const leave = cacheStore.getLeave(emp.id, dateKey);
+        
+        // 优先检查请假
+        if (leave && leave.status === 'approved') {
+          leaveCount++;
+          leaveDetails.push({
+            date: dateKey,
+            type: leave.leave_type,
+            days: 1
+          });
+          continue; // 请假不算未到，也不统计其他
+        }
+        
+        // 检查考勤记录
+        if (attendance) {
+          const hasCheckin = attendance.checkins.length > 0;
+          const hasCheckout = attendance.checkouts.length > 0;
+          
+          if (hasCheckin) {
+            // 有上班打卡，算工作天数
+            workDays++;
+            
+            // 检查是否迟到
+            const lateCheckin = attendance.checkins.find(c => c.status === 'late');
+            if (lateCheckin) {
+              lateCount++;
+              lateDetails.push({
+                date: dateKey,
+                minutes: lateCheckin.late_minutes || 0,
+                punch_time: lateCheckin.punch_time
+              });
+            } else {
+              // 没有迟到，且没有早退，算正常天数
+              const hasEarly = hasCheckout && attendance.checkouts.some(c => c.status === 'early');
+              if (!hasEarly) {
+                normalCount++;
+              }
+            }
+            
+            // 检查是否早退
+            if (hasCheckout) {
+              const earlyCheckout = attendance.checkouts.find(c => c.status === 'early');
+              if (earlyCheckout) {
+                earlyCount++;
+                earlyDetails.push({
+                  date: dateKey,
+                  minutes: earlyCheckout.early_minutes || 0,
+                  punch_time: earlyCheckout.punch_time
+                });
+              }
+            }
+          } else if (hasCheckout) {
+            // 只有下班打卡，没有上班打卡（异常情况）
+            workDays++;
+            const earlyCheckout = attendance.checkouts.find(c => c.status === 'early');
+            if (earlyCheckout) {
+              earlyCount++;
+              earlyDetails.push({
+                date: dateKey,
+                minutes: earlyCheckout.early_minutes || 0,
+                punch_time: earlyCheckout.punch_time
+              });
+            }
+          }
+          // 如果有考勤记录（即使只有checkout），就不算未到
+        } else {
+          // 既没有考勤也没有请假
+          // 只有工作日才算未到
+          if (!isWeekend) {
+            absentCount++;
+            absentDetails.push({
+              date: dateKey
+            });
+          }
+        }
+      }
+      
+      stats.push({
+        employee_id: emp.id,
+        employee_no: emp.employee_no,
+        employee_name: emp.name,
+        department: emp.department_name || '未分配',
+        position: emp.position || '',
+        month: targetMonth,
+        late_count: lateCount,
+        early_count: earlyCount,
+        normal_count: normalCount,
+        absent_count: absentCount,
+        leave_count: leaveCount,
+        work_days: workDays,
+        total_days: end.diff(start, 'days') + 1,
+        leave_details: leaveDetails,
+        late_details: lateDetails, // 迟到详情
+        early_details: earlyDetails, // 早退详情
+        absent_details: absentDetails // 未到详情
+      });
+    }
+    
+    // 按迟到次数降序排序
+    stats.sort((a, b) => {
+      if (b.late_count !== a.late_count) return b.late_count - a.late_count;
+      if (b.absent_count !== a.absent_count) return b.absent_count - a.absent_count;
+      if (b.early_count !== a.early_count) return b.early_count - a.early_count;
+      return a.employee_no.localeCompare(b.employee_no);
+    });
+    
+    const resultData = {
+      month: targetMonth,
+      stats: stats,
+      summary: {
+        total_employees: stats.length,
+        total_late: stats.reduce((sum, s) => sum + s.late_count, 0),
+        total_early: stats.reduce((sum, s) => sum + s.early_count, 0),
+        total_absent: stats.reduce((sum, s) => sum + s.absent_count, 0),
+        total_leave: stats.reduce((sum, s) => sum + s.leave_count, 0)
+      }
+    };
+    
+    // 缓存5分钟
+    cache.set(cacheKey, resultData, 5 * 60 * 1000);
+    
+    res.json({
+      success: true,
+      data: resultData
+    });
+  } catch (error) {
+    console.error('获取员工月度统计错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '服务器错误',
+      error: error.message
+    });
+  }
+});
+
+// 导出员工月度统计（Excel）
+router.get('/export/employee-monthly-stats', async (req, res) => {
+  try {
+    const { month, departmentId, employeeId } = req.query;
+    
+    // 获取统计数据
+    const targetMonth = month || moment().format('YYYY-MM');
+    const startDate = `${targetMonth}-01`;
+    const endDate = moment(startDate).endOf('month').format('YYYY-MM-DD');
+    
+    // 从缓存获取员工列表
+    let employees = [];
+    if (employeeId) {
+      const emp = cacheStore.getEmployee(parseInt(employeeId));
+      if (emp) employees = [emp];
+    } else if (departmentId) {
+      employees = cacheStore.getEmployeesByCondition({ departmentId: parseInt(departmentId) });
+    } else {
+      employees = cacheStore.getAllEmployees();
+    }
+    
+    const employeeIds = employees.map(emp => emp.id);
+    const stats = [];
+    
+    // 从缓存获取考勤记录和请假记录
+    const start = moment(startDate);
+    const end = moment(endDate);
+    
+    for (const emp of employees) {
+      let lateCount = 0;
+      let earlyCount = 0;
+      let normalCount = 0;
+      let absentCount = 0;
+      let leaveCount = 0;
+      let workDays = 0;
+      const lateDetails = [];
+      const earlyDetails = [];
+      const absentDetails = [];
+      const leaveDetails = [];
+      
+      // 统计每天的考勤
+      for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+        const dateKey = d.format('YYYY-MM-DD');
+        const attendance = cacheStore.getAttendance(emp.id, dateKey);
+        const leave = cacheStore.getLeave(emp.id, dateKey);
+        
+        const dayOfWeek = d.day();
+        const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+        
+        // 优先检查请假
+        if (leave && leave.status === 'approved') {
+          leaveCount++;
+          leaveDetails.push(moment(dateKey).format('MM-DD'));
+          continue;
+        }
+        
+        // 检查考勤记录
+        if (attendance) {
+          const hasCheckin = attendance.checkins.length > 0;
+          const hasCheckout = attendance.checkouts.length > 0;
+          
+          if (hasCheckin) {
+            workDays++;
+            const lateCheckin = attendance.checkins.find(c => c.status === 'late');
+            if (lateCheckin) {
+              lateCount++;
+              lateDetails.push(`${moment(dateKey).format('MM-DD')}(${lateCheckin.late_minutes || 0}分钟)`);
+            } else {
+              const hasEarly = hasCheckout && attendance.checkouts.some(c => c.status === 'early');
+              if (!hasEarly) {
+                normalCount++;
+              }
+            }
+            
+            if (hasCheckout) {
+              const earlyCheckout = attendance.checkouts.find(c => c.status === 'early');
+              if (earlyCheckout) {
+                earlyCount++;
+                earlyDetails.push(`${moment(dateKey).format('MM-DD')}(${earlyCheckout.early_minutes || 0}分钟)`);
+              }
+            }
+          } else if (hasCheckout) {
+            workDays++;
+            const earlyCheckout = attendance.checkouts.find(c => c.status === 'early');
+            if (earlyCheckout) {
+              earlyCount++;
+              earlyDetails.push(`${moment(dateKey).format('MM-DD')}(${earlyCheckout.early_minutes || 0}分钟)`);
+            }
+          }
+        } else {
+          // 既没有考勤也没有请假，且是工作日，算未到
+          if (!isWeekend) {
+            absentCount++;
+            absentDetails.push(moment(dateKey).format('MM-DD'));
+          }
+        }
+      }
+      
+      stats.push({
+        '工号': emp.employee_no,
+        '姓名': emp.name,
+        '部门': emp.department_name || '未分配',
+        '职位': emp.position || '',
+        '正常天数': normalCount,
+        '迟到次数': lateCount,
+        '迟到详情': lateDetails.length > 0 ? lateDetails.join('、') : '',
+        '早退次数': earlyCount,
+        '早退详情': earlyDetails.length > 0 ? earlyDetails.join('、') : '',
+        '未到天数': absentCount,
+        '未到详情': absentDetails.length > 0 ? absentDetails.join('、') : '',
+        '请假天数': leaveCount,
+        '请假详情': leaveDetails.length > 0 ? leaveDetails.join('、') : '',
+        '工作天数': workDays,
+        '总天数': end.diff(start, 'days') + 1
+      });
+    }
+    
+    // 按迟到次数降序排序
+    stats.sort((a, b) => {
+      if (b['迟到次数'] !== a['迟到次数']) return b['迟到次数'] - a['迟到次数'];
+      if (b['未到天数'] !== a['未到天数']) return b['未到天数'] - a['未到天数'];
+      if (b['早退次数'] !== a['早退次数']) return b['早退次数'] - a['早退次数'];
+      return a['工号'].localeCompare(b['工号']);
+    });
+    
+    // 创建工作簿
+    const worksheet = XLSX.utils.json_to_sheet(stats);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, '员工月度统计');
+    
+    // 设置列宽
+    const colWidths = [
+      { wch: 10 }, // 工号
+      { wch: 12 }, // 姓名
+      { wch: 12 }, // 部门
+      { wch: 12 }, // 职位
+      { wch: 10 }, // 正常天数
+      { wch: 10 }, // 迟到次数
+      { wch: 40 }, // 迟到详情
+      { wch: 10 }, // 早退次数
+      { wch: 40 }, // 早退详情
+      { wch: 10 }, // 未到天数
+      { wch: 40 }, // 未到详情
+      { wch: 10 }, // 请假天数
+      { wch: 40 }, // 请假详情
+      { wch: 10 }, // 工作天数
+      { wch: 10 }  // 总天数
+    ];
+    worksheet['!cols'] = colWidths;
+    
+    // 生成Excel文件
+    const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    
+    // 设置响应头
+    const filename = `员工月度统计_${targetMonth}_${moment().format('YYYYMMDD_HHmmss')}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    
+    res.send(excelBuffer);
+  } catch (error) {
+    console.error('导出员工月度统计失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '导出失败',
+      error: error.message
     });
   }
 });

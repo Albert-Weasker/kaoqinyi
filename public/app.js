@@ -7,6 +7,93 @@ const pageSize = 20;
 let employees = [];
 let departments = [];
 
+// 前端缓存（使用localStorage + 内存缓存）
+const frontendCache = {
+    memory: new Map(),
+    ttl: {
+        todayStats: 30 * 1000, // 30秒
+        stats: 60 * 1000, // 1分钟
+        employees: 5 * 60 * 1000, // 5分钟
+        departments: 10 * 60 * 1000, // 10分钟
+        rules: 10 * 60 * 1000 // 10分钟
+    },
+    
+    get(key) {
+        // 先检查内存缓存
+        const memItem = this.memory.get(key);
+        if (memItem && Date.now() < memItem.expires) {
+            return memItem.data;
+        }
+        
+        // 再检查localStorage
+        try {
+            const item = localStorage.getItem(`cache_${key}`);
+            if (item) {
+                const parsed = JSON.parse(item);
+                if (Date.now() < parsed.expires) {
+                    // 同步到内存缓存
+                    this.memory.set(key, parsed);
+                    return parsed.data;
+                } else {
+                    localStorage.removeItem(`cache_${key}`);
+                }
+            }
+        } catch (e) {
+            console.warn('读取缓存失败:', e);
+        }
+        
+        return null;
+    },
+    
+    set(key, data, customTTL) {
+        const ttl = customTTL || this.ttl[key] || 60 * 1000;
+        const item = {
+            data,
+            expires: Date.now() + ttl
+        };
+        
+        // 保存到内存
+        this.memory.set(key, item);
+        
+        // 保存到localStorage（异步，不阻塞）
+        try {
+            localStorage.setItem(`cache_${key}`, JSON.stringify(item));
+        } catch (e) {
+            console.warn('保存缓存失败:', e);
+        }
+    },
+    
+    clear(key) {
+        this.memory.delete(key);
+        try {
+            localStorage.removeItem(`cache_${key}`);
+        } catch (e) {
+            console.warn('清除缓存失败:', e);
+        }
+    },
+    
+    clearPrefix(prefix) {
+        // 清除内存缓存
+        for (const key of this.memory.keys()) {
+            if (key.startsWith(prefix)) {
+                this.memory.delete(key);
+            }
+        }
+        
+        // 清除localStorage缓存
+        try {
+            const keys = Object.keys(localStorage);
+            keys.forEach(k => {
+                if (k.startsWith(`cache_${prefix}`)) {
+                    localStorage.removeItem(k);
+                }
+            });
+        } catch (e) {
+            console.warn('清除缓存失败:', e);
+        }
+    }
+};
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     // 先初始化路由系统，确保页面能正确显示
@@ -21,10 +108,13 @@ async function init() {
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000);
     
-    await loadDepartments();
-    await loadEmployees();
-    await loadRules();
-    await loadTodayStats();
+    // 并行加载所有数据，提升速度
+    await Promise.all([
+        loadDepartments(),
+        loadEmployees(),
+        loadRules(),
+        loadTodayStats()
+    ]);
     
     // 绑定事件
     document.getElementById('searchBtn')?.addEventListener('click', () => {
@@ -165,6 +255,7 @@ function switchPage(page) {
         'rules': '设置',
         'employees': '员工名单',
         'stats': '月度报表',
+        'worktime': '工作时长',
         'leave': '请假审批',
         'departments': '部门设置',
         'import': '数据导入'
@@ -183,6 +274,8 @@ function switchPage(page) {
         loadEmployeesPage();
     } else if (page === 'stats') {
         loadStatsPage();
+    } else if (page === 'worktime') {
+        loadWorktimePage();
     } else if (page === 'import') {
         loadImportPage();
     }
@@ -335,41 +428,65 @@ function updateCurrentTime() {
     document.getElementById('currentTime').textContent = timeStr;
 }
 
-// 加载部门列表
+// 加载部门列表（使用缓存）
 async function loadDepartments() {
+    try {
+        // 先检查缓存
+        const cached = frontendCache.get('departments');
+        if (cached) {
+            departments = cached;
+            renderDepartments();
+            // 后台静默更新
+            loadDepartmentsFromAPI().catch(() => {});
+            return;
+        }
+        
+        await loadDepartmentsFromAPI();
+    } catch (error) {
+        console.error('加载部门列表失败:', error);
+    }
+}
+
+// 从API加载部门列表
+async function loadDepartmentsFromAPI() {
     try {
         const response = await fetch(`${API_BASE}/department`);
         const result = await response.json();
         
         if (result.success) {
             departments = result.data;
-            
-            // 填充部门下拉框
-            const departmentFilter = document.getElementById('departmentFilter');
-            const leaveDepartmentFilter = document.getElementById('leaveDepartmentFilter');
-            
-            if (departmentFilter) {
-                departmentFilter.innerHTML = '<option value="">全部部门</option>';
-                departments.forEach(dept => {
-                    const option = document.createElement('option');
-                    option.value = dept.id;
-                    option.textContent = dept.name;
-                    departmentFilter.appendChild(option);
-                });
-            }
-            
-            if (leaveDepartmentFilter) {
-                leaveDepartmentFilter.innerHTML = '<option value="">全部部门</option>';
-                departments.forEach(dept => {
-                    const option = document.createElement('option');
-                    option.value = dept.id;
-                    option.textContent = dept.name;
-                    leaveDepartmentFilter.appendChild(option);
-                });
-            }
+            frontendCache.set('departments', departments);
+            renderDepartments();
         }
     } catch (error) {
         console.error('加载部门列表失败:', error);
+    }
+}
+
+// 渲染部门列表（提取为独立函数）
+function renderDepartments() {
+    // 填充部门下拉框
+    const departmentFilter = document.getElementById('departmentFilter');
+    const leaveDepartmentFilter = document.getElementById('leaveDepartmentFilter');
+    
+    if (departmentFilter) {
+        departmentFilter.innerHTML = '<option value="">全部部门</option>';
+        departments.forEach(dept => {
+            const option = document.createElement('option');
+            option.value = dept.id;
+            option.textContent = dept.name;
+            departmentFilter.appendChild(option);
+        });
+    }
+    
+    if (leaveDepartmentFilter) {
+        leaveDepartmentFilter.innerHTML = '<option value="">全部部门</option>';
+        departments.forEach(dept => {
+            const option = document.createElement('option');
+            option.value = dept.id;
+            option.textContent = dept.name;
+            leaveDepartmentFilter.appendChild(option);
+        });
     }
 }
 
@@ -460,54 +577,129 @@ function debounce(func, wait) {
     };
 }
 
-// 加载今日统计
+// 加载今日统计（带错误处理和重试，使用缓存）
 async function loadTodayStats() {
     try {
-        const response = await fetch(`${API_BASE}/attendance/today-stats`);
-        const result = await response.json();
-        
-        if (result.success) {
-            const data = result.data;
-            
-            // 更新核心数字
-            document.getElementById('expectedCount').textContent = `${data.expectedCount || 0} 人`;
-            document.getElementById('presentCount').textContent = `${data.presentCount || 0} / ${data.expectedCount || 0} 人`;
-            document.getElementById('absentCount').textContent = `${data.absentCount || 0} / ${data.expectedCount || 0} 人`;
-            
-            // 更新顶部提示
-            const alertBar = document.getElementById('homeAlertBar');
-            const alertText = document.getElementById('homeAlertText');
-            
-            if (data.anomalies && data.anomalies.length > 0) {
-                const lateCount = data.anomalies.filter(a => a.status === '迟到').length;
-                const earlyCount = data.anomalies.filter(a => a.status === '早退').length;
-                const absentCount = data.anomalies.filter(a => a.status === '未到').length;
-                
-                let alertMsg = '⚠️ 今日异常：';
-                const parts = [];
-                if (absentCount > 0) parts.push(`${absentCount} 人未到`);
-                if (lateCount > 0) parts.push(`${lateCount} 人迟到`);
-                if (earlyCount > 0) parts.push(`${earlyCount} 人早退`);
-                
-                alertMsg += parts.join('｜');
-                alertText.textContent = alertMsg;
-                alertBar.className = 'alert-bar alert-warning';
-            } else {
-                alertText.textContent = '✅ 今日考勤正常';
-                alertBar.className = 'alert-bar alert-success';
-            }
-            
-            // 更新异常列表
-            renderAnomaliesTable(data.anomalies || []);
-            
-            // 更新操作按钮（显示待审批请假数量）
-            const approveBtn = document.getElementById('actionApprove');
-            if (approveBtn && data.pendingLeaveCount > 0) {
-                approveBtn.textContent = `📝 批准请假（${data.pendingLeaveCount}）`;
-            }
+        // 先检查缓存
+        const cacheKey = 'todayStats';
+        const cached = frontendCache.get(cacheKey);
+        if (cached) {
+            renderTodayStats(cached);
+            // 后台静默更新（不阻塞UI）
+            loadTodayStatsFromAPI(cacheKey).catch(() => {});
+            return;
         }
+        
+        // 缓存未命中，从API加载
+        await loadTodayStatsFromAPI(cacheKey);
     } catch (error) {
         console.error('加载今日统计失败:', error);
+        showError('加载今日统计失败，请刷新页面重试');
+    }
+}
+
+// 从API加载今日统计
+async function loadTodayStatsFromAPI(cacheKey) {
+    // 添加超时控制（5秒，减少等待时间）
+    let controller;
+    let timeoutId;
+    
+    if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 5000);
+    }
+    
+    let response;
+    let retries = 0;
+    const maxRetries = 1; // 减少重试次数
+    
+    while (retries <= maxRetries) {
+        try {
+            const fetchOptions = {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-cache' // 确保获取最新数据
+                }
+            };
+            
+            if (controller) {
+                fetchOptions.signal = controller.signal;
+            }
+            
+            response = await fetch(`${API_BASE}/attendance/today-stats`, fetchOptions);
+            break;
+        } catch (fetchError) {
+            retries++;
+            if (retries > maxRetries) {
+                throw fetchError;
+            }
+            await new Promise(resolve => setTimeout(resolve, 500 * retries)); // 减少重试等待时间
+        }
+    }
+    
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    if (!response || !response.ok) {
+        throw new Error(`HTTP ${response?.status || 'error'}`);
+    }
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        const data = result.data;
+        
+        // 保存到缓存
+        frontendCache.set(cacheKey, data);
+        
+        renderTodayStats(data);
+    } else {
+        throw new Error(result.message || '加载失败');
+    }
+}
+
+// 渲染今日统计（提取为独立函数，便于复用）
+function renderTodayStats(data) {
+    // 更新核心数字
+    const expectedEl = document.getElementById('expectedCount');
+    const presentEl = document.getElementById('presentCount');
+    const absentEl = document.getElementById('absentCount');
+    
+    if (expectedEl) expectedEl.textContent = `${data.expectedCount || 0} 人`;
+    if (presentEl) presentEl.textContent = `${data.presentCount || 0} / ${data.expectedCount || 0} 人`;
+    if (absentEl) absentEl.textContent = `${data.absentCount || 0} / ${data.expectedCount || 0} 人`;
+    
+    // 更新顶部提示
+    const alertBar = document.getElementById('homeAlertBar');
+    const alertText = document.getElementById('homeAlertText');
+    
+    if (alertBar && alertText) {
+        if (data.anomalies && data.anomalies.length > 0) {
+            const lateCount = data.anomalies.filter(a => a.status === '迟到').length;
+            const earlyCount = data.anomalies.filter(a => a.status === '早退').length;
+            const absentCount = data.anomalies.filter(a => a.status === '未到').length;
+            
+            let alertMsg = '⚠️ 今日异常：';
+            const parts = [];
+            if (absentCount > 0) parts.push(`${absentCount} 人未到`);
+            if (lateCount > 0) parts.push(`${lateCount} 人迟到`);
+            if (earlyCount > 0) parts.push(`${earlyCount} 人早退`);
+            
+            alertMsg += parts.join('｜');
+            alertText.textContent = alertMsg;
+            alertBar.className = 'alert-bar alert-warning';
+        } else {
+            alertText.textContent = '✅ 今日考勤正常';
+            alertBar.className = 'alert-bar alert-success';
+        }
+    }
+    
+    // 更新异常列表
+    renderAnomaliesTable(data.anomalies || []);
+    
+    // 更新操作按钮（显示待审批请假数量）
+    const approveBtn = document.getElementById('actionApprove');
+    if (approveBtn && data.pendingLeaveCount > 0) {
+        approveBtn.textContent = `📝 批准请假（${data.pendingLeaveCount}）`;
     }
 }
 
@@ -1889,6 +2081,255 @@ window.openEmployeeTagModal = openEmployeeTagModal;
 window.closeEmployeeTagModal = closeEmployeeTagModal;
 window.saveEmployeeTag = saveEmployeeTag;
 
+// ==================== 工作时长统计功能 ====================
+
+// 加载工作时长统计页面
+async function loadWorktimePage() {
+    await loadEmployees();
+    await loadDepartments();
+    
+    // 填充员工下拉框
+    const employeeSelect = document.getElementById('worktimeEmployeeSelect');
+    if (employeeSelect && employees) {
+        employeeSelect.innerHTML = '<option value="">请选择员工</option>';
+        employees.forEach(emp => {
+            const option = document.createElement('option');
+            option.value = emp.id;
+            option.textContent = `${emp.name} (${emp.employee_no})`;
+            employeeSelect.appendChild(option);
+        });
+    }
+    
+    // 填充部门下拉框
+    const departmentSelect = document.getElementById('worktimeDepartmentSelect');
+    if (departmentSelect && departments) {
+        departmentSelect.innerHTML = '<option value="">请选择部门</option>';
+        departments.forEach(dept => {
+            const option = document.createElement('option');
+            option.value = dept.id;
+            option.textContent = dept.name;
+            departmentSelect.appendChild(option);
+        });
+    }
+    
+    // 设置默认日期范围（最近30天）
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 30);
+    
+    const startDateInput = document.getElementById('worktimeStartDate');
+    const endDateInput = document.getElementById('worktimeEndDate');
+    if (startDateInput) startDateInput.value = startDate.toISOString().slice(0, 10);
+    if (endDateInput) endDateInput.value = endDate.toISOString().slice(0, 10);
+    
+    // 绑定查询方式切换
+    const queryTypeSelect = document.getElementById('worktimeQueryType');
+    if (queryTypeSelect && !queryTypeSelect.hasAttribute('data-bound')) {
+        queryTypeSelect.setAttribute('data-bound', 'true');
+        queryTypeSelect.addEventListener('change', function() {
+            const type = this.value;
+            document.getElementById('worktimeEmployeeSelectWrapper').style.display = type === 'employee' ? 'inline-block' : 'none';
+            document.getElementById('worktimeEmployeeNameWrapper').style.display = type === 'name' ? 'inline-block' : 'none';
+            document.getElementById('worktimeDepartmentWrapper').style.display = type === 'department' ? 'inline-block' : 'none';
+        });
+    }
+    
+    // 绑定查询按钮
+    const searchBtn = document.getElementById('worktimeSearchBtn');
+    if (searchBtn && !searchBtn.hasAttribute('data-bound')) {
+        searchBtn.setAttribute('data-bound', 'true');
+        searchBtn.addEventListener('click', loadWorktimeData);
+    }
+}
+
+// 工作时长详情数据缓存
+let worktimeDetailsCache = {};
+
+// 加载工作时长数据
+async function loadWorktimeData() {
+    const queryType = document.getElementById('worktimeQueryType')?.value || 'employee';
+    const employeeId = document.getElementById('worktimeEmployeeSelect')?.value;
+    const employeeName = document.getElementById('worktimeEmployeeName')?.value;
+    const departmentId = document.getElementById('worktimeDepartmentSelect')?.value;
+    const startDate = document.getElementById('worktimeStartDate')?.value;
+    const endDate = document.getElementById('worktimeEndDate')?.value;
+    const groupBy = document.getElementById('worktimeGroupBy')?.value || 'day';
+    
+    // 验证查询条件
+    if (queryType === 'employee' && !employeeId) {
+        showError('请选择员工');
+        return;
+    }
+    if (queryType === 'name' && !employeeName) {
+        showError('请输入员工姓名或工号');
+        return;
+    }
+    if (queryType === 'department' && !departmentId) {
+        showError('请选择部门');
+        return;
+    }
+    
+    try {
+        const params = new URLSearchParams();
+        if (employeeId) params.append('employeeId', employeeId);
+        if (employeeName) params.append('employeeName', employeeName);
+        if (departmentId) params.append('departmentId', departmentId);
+        if (startDate) params.append('startDate', startDate);
+        if (endDate) params.append('endDate', endDate);
+        params.append('groupBy', groupBy);
+        
+        const response = await fetch(`${API_BASE}/attendance/worktime?${params}`);
+        const result = await response.json();
+        
+        if (result.success) {
+            worktimeDetailsCache = {};
+            if (result.data.periodStats) {
+                result.data.periodStats.forEach(period => {
+                    // 使用periodKey（原始值）或period（格式化后的值）作为缓存键
+                    const cacheKey = period.periodKey || period.period;
+                    worktimeDetailsCache[cacheKey] = period.details;
+                });
+            }
+            renderWorktimeData(result.data);
+        } else {
+            showError(result.message || '加载数据失败');
+        }
+    } catch (error) {
+        console.error('加载工作时长数据失败:', error);
+        showError('加载数据失败，请稍后重试');
+    }
+}
+
+// 渲染工作时长数据
+function renderWorktimeData(data) {
+    // 显示员工信息（支持多员工）
+    const employeeCard = document.getElementById('worktimeEmployeeCard');
+    const employeeNameEl = document.getElementById('worktimeEmployeeName');
+    const employeeInfoEl = document.getElementById('worktimeEmployeeInfo');
+    
+    if (employeeCard && employeeNameEl && employeeInfoEl) {
+        if (data.employees && data.employees.length > 0) {
+            if (data.employees.length === 1) {
+                // 单个员工
+                employeeNameEl.textContent = data.employees[0].name;
+                employeeInfoEl.textContent = `${data.employees[0].employee_no} | ${data.employees[0].department} | ${data.employees[0].position || '无'}`;
+            } else {
+                // 多个员工（部门查询）
+                employeeNameEl.textContent = `共 ${data.employees.length} 名员工`;
+                employeeInfoEl.textContent = data.employees.map(emp => `${emp.name}(${emp.employee_no})`).join('、');
+            }
+            employeeCard.style.display = 'block';
+        } else {
+            employeeCard.style.display = 'none';
+        }
+    }
+    
+    // 显示汇总统计
+    const summary = document.getElementById('worktimeSummary');
+    if (summary) {
+        document.getElementById('summaryTotalDays').textContent = data.summary.totalDays;
+        document.getElementById('summaryWorkDays').textContent = data.summary.workDays;
+        document.getElementById('summaryLeaveDays').textContent = data.summary.leaveDays;
+        document.getElementById('summaryAbsentDays').textContent = data.summary.absentDays;
+        document.getElementById('summaryTotalTime').textContent = data.summary.formattedTime;
+        document.getElementById('summaryAvgTime').textContent = `${data.summary.avgWorkHours}小时`;
+        summary.style.display = 'block';
+    }
+    
+    // 渲染时间段统计
+    renderPeriodStats(data.periodStats);
+    
+    // 显示详细记录（默认显示第一个时间段）
+    if (data.periodStats && data.periodStats.length > 0) {
+        renderWorktimeDetails(data.periodStats[0].details);
+    }
+}
+
+// 渲染时间段统计
+function renderPeriodStats(periodStats) {
+    const tbody = document.getElementById('worktimePeriodTableBody');
+    const container = document.getElementById('worktimePeriodStats');
+    
+    if (!tbody || !container) return;
+    
+    tbody.innerHTML = '';
+    
+    periodStats.forEach(period => {
+        const hours = Math.floor(period.totalSeconds / 3600);
+        const minutes = Math.floor((period.totalSeconds % 3600) / 60);
+        const seconds = period.totalSeconds % 60;
+        const formattedTime = `${hours}小时${minutes}分钟${seconds}秒`;
+        
+        // 格式化period显示（处理ISO日期字符串）
+        let periodDisplay = period.period;
+        if (typeof period.period === 'string' && period.period.includes('T')) {
+            // 如果是ISO日期字符串，转换为日期格式
+            const date = moment(period.period);
+            if (date.isValid()) {
+                periodDisplay = date.format('YYYY-MM-DD');
+            }
+        }
+        
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${periodDisplay}</td>
+            <td>${period.days}</td>
+            <td>${period.workDays}</td>
+            <td>${period.leaveDays}</td>
+            <td>${period.absentDays}</td>
+            <td>${formattedTime}</td>
+            <td>
+                <button class="btn btn-sm btn-primary" onclick="showWorktimeDetails('${period.period}')">
+                    查看详情
+                </button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+    
+    container.style.display = 'block';
+}
+
+// 显示详细记录
+function showWorktimeDetails(period) {
+    const details = worktimeDetailsCache[period];
+    if (details) {
+        renderWorktimeDetails(details);
+    }
+}
+
+// 渲染详细记录
+function renderWorktimeDetails(details) {
+    const tbody = document.getElementById('worktimeDetailsTableBody');
+    const container = document.getElementById('worktimeDetails');
+    
+    if (!tbody || !container) return;
+    
+    tbody.innerHTML = '';
+    
+    details.forEach(detail => {
+        const tr = document.createElement('tr');
+        const workTime = detail.work_seconds > 0 
+            ? `${detail.work_hours}小时${detail.work_minutes}分钟${detail.work_seconds_remain}秒`
+            : '-';
+        
+        tr.innerHTML = `
+            <td>${detail.date}</td>
+            <td>${detail.checkin_time || '-'}</td>
+            <td>${detail.checkout_time || '-'}</td>
+            <td>${workTime}</td>
+            <td>${detail.status}</td>
+            <td>${detail.leave_type || (detail.status === '未到' ? '未打卡' : '-')}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+    
+    container.style.display = 'block';
+}
+
+// 暴露到全局
+window.showWorktimeDetails = showWorktimeDetails;
+
 // ==================== 统计报表功能 ====================
 
 let chartInstances = {};
@@ -1928,29 +2369,102 @@ async function loadStatsPage() {
     await loadStatsData();
 }
 
-// 加载统计数据
+// 加载统计数据（带重试和错误处理，使用缓存）
 async function loadStatsData() {
+    const loadingEl = document.getElementById('statsLoading');
+    if (loadingEl) loadingEl.style.display = 'block';
+    
     try {
         const startDate = document.getElementById('statsStartDate')?.value || '';
         const endDate = document.getElementById('statsEndDate')?.value || '';
         const departmentId = document.getElementById('statsDepartmentFilter')?.value || '';
         
-        const params = new URLSearchParams();
-        if (startDate) params.append('startDate', startDate);
-        if (endDate) params.append('endDate', endDate);
-        if (departmentId) params.append('departmentId', departmentId);
+        // 生成缓存键
+        const cacheKey = `stats_${startDate}_${endDate}_${departmentId}`;
         
-        const response = await fetch(`${API_BASE}/attendance/stats?${params}`);
-        const result = await response.json();
-        
-        if (result.success) {
-            renderAllCharts(result.data);
-        } else {
-            showError('加载统计数据失败');
+        // 先检查缓存
+        const cached = frontendCache.get(cacheKey);
+        if (cached) {
+            renderAllCharts(cached);
+            if (loadingEl) loadingEl.style.display = 'none';
+            // 后台静默更新
+            loadStatsDataFromAPI(cacheKey, startDate, endDate, departmentId).catch(() => {});
+            return;
         }
+        
+        await loadStatsDataFromAPI(cacheKey, startDate, endDate, departmentId);
     } catch (error) {
         console.error('加载统计数据失败:', error);
-        showError('加载统计数据失败');
+        if (error.name === 'AbortError') {
+            showError('请求超时，请稍后重试');
+        } else if (error.message && error.message.includes('Failed to fetch')) {
+            showError('网络连接失败，请检查网络后重试');
+        } else {
+            showError('加载统计数据失败，请刷新页面重试');
+        }
+    } finally {
+        if (loadingEl) loadingEl.style.display = 'none';
+    }
+}
+
+// 从API加载统计数据
+async function loadStatsDataFromAPI(cacheKey, startDate, endDate, departmentId) {
+    const params = new URLSearchParams();
+    if (startDate) params.append('startDate', startDate);
+    if (endDate) params.append('endDate', endDate);
+    if (departmentId) params.append('departmentId', departmentId);
+    
+    // 添加超时控制（15秒，减少等待时间）
+    let controller;
+    let timeoutId;
+    
+    if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 15000);
+    }
+    
+    let response;
+    let retries = 0;
+    const maxRetries = 1; // 减少重试次数
+    
+    while (retries <= maxRetries) {
+        try {
+            const fetchOptions = {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            };
+            
+            if (controller) {
+                fetchOptions.signal = controller.signal;
+            }
+            
+            response = await fetch(`${API_BASE}/attendance/stats?${params}`, fetchOptions);
+            break;
+        } catch (fetchError) {
+            retries++;
+            if (retries > maxRetries) {
+                throw fetchError;
+            }
+            await new Promise(resolve => setTimeout(resolve, 500 * retries));
+        }
+    }
+    
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    if (!response || !response.ok) {
+        throw new Error(`HTTP ${response?.status || 'error'}`);
+    }
+    
+    const result = await response.json();
+    
+    if (result.success) {
+        const data = result.data;
+        // 保存到缓存
+        frontendCache.set(cacheKey, data);
+        renderAllCharts(data);
+    } else {
+        throw new Error(result.message || '加载统计数据失败');
     }
 }
 

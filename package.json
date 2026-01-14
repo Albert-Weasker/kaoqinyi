@@ -19,6 +19,9 @@
     "sync-to-cloud:confirm": "node scripts/sync-to-cloud.js --confirm",
     "sync-to-postgres": "node scripts/sync-to-postgres.js",
     "test-postgres": "node scripts/test-postgres.js",
+    "clear-attendance": "node scripts/clear-attendance.js",
+    "generate-test-data": "node scripts/generate-test-data.js",
+    "generate-today": "node scripts/generate-today-attendance.js",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down",
     "docker:logs": "docker-compose logs -f mysql"

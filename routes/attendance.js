@@ -4,6 +4,9 @@ const db = require('../config/database');
 const moment = require('moment');
 const XLSX = require('xlsx');
 const { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType, AlignmentType, TextRun } = require('docx');
+const cache = require('../utils/cache');
+const cacheStore = require('../utils/cache-store');
+const CACHE_PREFIXES = ['worktime', 'stats', 'today', 'today-stats', 'attendance'];
 
 // 获取数据库类型
 const dbType = require('../config/database').dbType;
@@ -13,6 +16,11 @@ function getDateExpr(column) {
   return dbType === 'postgresql' 
     ? `${column}::date`
     : `DATE(${column})`;
+}
+
+// 统一清理与考勤相关的缓存
+function invalidateAttendanceCache() {
+  CACHE_PREFIXES.forEach(prefix => cache.clearPrefix(prefix));
 }
 
 // 打卡（上班/下班）
@@ -39,46 +47,35 @@ router.post('/punch', async (req, res) => {
     const today = now.format('YYYY-MM-DD');
     const todayDate = now.format('YYYY-MM-DD');
 
-    // 获取默认考勤规则
-    const dbType = require('../config/database').dbType;
-    const isDefaultValue = dbType === 'postgresql' ? true : 1;
-    const [rules] = await db.promise.execute(
-      'SELECT * FROM attendance_rules WHERE is_default = ? LIMIT 1',
-      [isDefaultValue]
-    );
-    
-    let rule = {
-      checkin_time: '09:00:00',
-      checkin_late_time: '09:15:00',
-      checkout_time: '18:00:00',
-      checkout_early_time: '17:45:00'
-    };
-    
-    if (rules.length > 0) {
-      rule = rules[0];
-    }
-
-    // 检查员工是否存在
-    const [employees] = await db.promise.execute(
-      'SELECT * FROM employees WHERE id = ?',
-      [employeeId]
-    );
-
-    if (employees.length === 0) {
+    // 从缓存获取员工信息
+    const employee = cacheStore.getEmployee(employeeId);
+    if (!employee) {
       return res.status(404).json({ 
         success: false, 
         message: '员工不存在' 
       });
     }
 
-    const employee = employees[0];
+    // 从缓存获取考勤规则
+    const rule = cacheStore.getDefaultRule();
+    if (!rule) {
+      return res.status(404).json({ 
+        success: false, 
+        message: '未设置考勤规则' 
+      });
+    }
 
-    // 检查今天是否已有打卡记录
-    const dateExpr = getDateExpr('punch_time');
-    const [existingRecords] = await db.promise.execute(
-      `SELECT * FROM attendance WHERE employee_id = ? AND ${dateExpr} = ?`,
-      [employeeId, today]
-    );
+    // 从缓存检查今天是否已有打卡记录
+    const existingAttendance = cacheStore.getAttendance(employeeId, today);
+    const existingRecords = [];
+    if (existingAttendance) {
+      existingAttendance.checkins.forEach(c => {
+        existingRecords.push({ type: 'checkin', punch_time: c.punch_time });
+      });
+      existingAttendance.checkouts.forEach(c => {
+        existingRecords.push({ type: 'checkout', punch_time: c.punch_time });
+      });
+    }
 
     if (type === 'checkin') {
       // 检查是否已经打过上班卡
@@ -100,11 +97,25 @@ router.post('/punch', async (req, res) => {
         lateMinutes = Math.floor(now.diff(checkinLateTime, 'minutes', true));
       }
 
-      // 插入上班打卡记录
+      // 先更新数据库
       await db.promise.execute(
         'INSERT INTO attendance (employee_id, type, punch_time, address, longitude, latitude, status, late_minutes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [employeeId, 'checkin', nowStr, address || '', longitude || null, latitude || null, status, lateMinutes, nowStr]
       );
+
+      // 再更新缓存
+      cacheStore.addAttendance({
+        employee_id: employeeId,
+        type: 'checkin',
+        punch_time: nowStr,
+        status: status,
+        late_minutes: lateMinutes
+      });
+
+      // 清除相关缓存
+      cache.clearPrefix('today-stats');
+      cache.clearPrefix('worktime');
+      cache.clearPrefix('stats');
 
       let message = '上班打卡成功';
       if (status === 'late') {
@@ -155,11 +166,25 @@ router.post('/punch', async (req, res) => {
         earlyMinutes = Math.floor(checkoutEarlyTime.diff(now, 'minutes', true));
       }
 
-      // 插入下班打卡记录
+      // 先更新数据库
       await db.promise.execute(
         'INSERT INTO attendance (employee_id, type, punch_time, address, longitude, latitude, status, early_minutes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [employeeId, 'checkout', nowStr, address || '', longitude || null, latitude || null, status, earlyMinutes, nowStr]
       );
+
+      // 再更新缓存
+      cacheStore.addAttendance({
+        employee_id: employeeId,
+        type: 'checkout',
+        punch_time: nowStr,
+        status: status,
+        early_minutes: earlyMinutes
+      });
+
+      // 清除相关缓存
+      cache.clearPrefix('today-stats');
+      cache.clearPrefix('worktime');
+      cache.clearPrefix('stats');
 
       let message = '下班打卡成功';
       if (status === 'early') {
@@ -307,98 +332,117 @@ router.get('/records', async (req, res) => {
   }
 });
 
-// 获取今日打卡统计
+// 获取今日打卡统计（完全基于缓存）
 router.get('/today-stats', async (req, res) => {
   try {
-    const dbType = require('../config/database').dbType;
     const today = moment().format('YYYY-MM-DD');
     
-    // 应到人数：员工总数
-    const [allEmployees] = await db.promise.execute(`
-      SELECT e.id, e.name, e.employee_no, d.name AS department
-      FROM employees e
-      LEFT JOIN departments d ON e.department_id = d.id
-    `);
+    // 生成缓存键（今日统计缓存1分钟）
+    const cacheKey = cache.generateKey('today-stats', { date: today });
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    // 从缓存获取所有员工
+    const allEmployees = cacheStore.getAllEmployees();
     const expectedCount = allEmployees.length;
 
-    // 今日已请假的员工（已批准或待审批的请假）
-    const [todayLeaves] = await db.promise.execute(`
-      SELECT DISTINCT employee_id 
-      FROM leave_requests 
-      WHERE start_date <= ? AND end_date >= ? 
-        AND status IN ('approved', 'pending')
-    `, [today, today]);
-    const leaveEmployeeIds = todayLeaves.map(r => r.employee_id);
-
-    // 今日到岗（上班到岗视为实到）
-    // 使用日期范围查询，避免时区问题
-    const startOfDay = `${today} 00:00:00`;
-    const endOfDay = `${today} 23:59:59`;
-    const [todayCheckins] = await db.promise.execute(`
-      SELECT DISTINCT employee_id 
-      FROM attendance 
-      WHERE punch_time >= ? AND punch_time < ? AND type = 'checkin'
-    `, [startOfDay, moment(today).add(1, 'day').format('YYYY-MM-DD 00:00:00')]);
+    // 从缓存获取今日请假员工
+    const leaveEmployeeIds = new Set();
+    const pendingLeaveIds = new Set();
+    const approvedLeaveIds = new Set();
     
-    const presentIds = todayCheckins.map(r => r.employee_id);
-    const presentCount = presentIds.length;
+    allEmployees.forEach(emp => {
+      const leave = cacheStore.getLeave(emp.id, today);
+      if (leave) {
+        if (leave.status === 'approved') {
+          approvedLeaveIds.add(emp.id);
+          leaveEmployeeIds.add(emp.id);
+        } else if (leave.status === 'pending') {
+          pendingLeaveIds.add(emp.id);
+          leaveEmployeeIds.add(emp.id);
+        }
+      }
+    });
 
-    // 迟到、早退记录
-    const [abnormalCheckins] = await db.promise.execute(`
-      SELECT a.employee_id, a.type, a.status, a.punch_time, e.name, e.employee_no, d.name AS department
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      LEFT JOIN departments d ON e.department_id = d.id
-      WHERE punch_time >= ? AND punch_time < ? AND a.status IN ('late', 'early')
-      ORDER BY a.punch_time DESC
-    `, [startOfDay, moment(today).add(1, 'day').format('YYYY-MM-DD 00:00:00')]);
+    // 从缓存获取今日到岗员工（有checkin记录就算上班）
+    const presentIds = new Set();
+    const abnormalCheckins = [];
+    
+    allEmployees.forEach(emp => {
+      const attendance = cacheStore.getAttendance(emp.id, today);
+      // 只要打了上班卡就算上班
+      if (attendance && attendance.checkins.length > 0) {
+        presentIds.add(emp.id);
+        
+        // 检查是否有迟到（取最早的checkin记录）
+        const earliestCheckin = attendance.checkins[0];
+        if (earliestCheckin && earliestCheckin.status === 'late') {
+          abnormalCheckins.push({
+            employee_id: emp.id,
+            name: emp.name,
+            department: emp.department_name || '未分配',
+            status: 'late',
+            punch_time: earliestCheckin.punch_time,
+            reason: moment(earliestCheckin.punch_time).format('HH:mm')
+          });
+        }
+        
+        // 检查是否有早退（取最晚的checkout记录）
+        if (attendance.checkouts.length > 0) {
+          const latestCheckout = attendance.checkouts[attendance.checkouts.length - 1];
+          if (latestCheckout && latestCheckout.status === 'early') {
+            abnormalCheckins.push({
+              employee_id: emp.id,
+              name: emp.name,
+              department: emp.department_name || '未分配',
+              status: 'early',
+              punch_time: latestCheckout.punch_time,
+              reason: moment(latestCheckout.punch_time).format('HH:mm')
+            });
+          }
+        }
+      }
+    });
+    
+    const presentCount = presentIds.size;
 
     // 未到：未上班到岗且未请假的员工
     const absentEmployees = allEmployees.filter(emp => 
-      !presentIds.includes(emp.id) && !leaveEmployeeIds.includes(emp.id)
+      !presentIds.has(emp.id) && !leaveEmployeeIds.has(emp.id)
     );
     const absentCount = absentEmployees.length;
 
     // 组装异常列表：优先展示迟到/早退，其次未到
     const anomalies = [];
-    abnormalCheckins.forEach(item => {
+    abnormalCheckins.slice(0, 50).forEach(item => {
       const statusLabel = item.status === 'late' ? '迟到' : '早退';
       anomalies.push({
         employee_id: item.employee_id,
         name: item.name,
-        department: item.department || '未分配',
+        department: item.department,
         status: statusLabel,
         punch_time: item.punch_time,
-        reason: moment(item.punch_time).format('HH:mm')
+        reason: item.reason
       });
     });
 
-    absentEmployees.forEach(emp => {
+    // 限制未到员工列表数量（最多显示100个）
+    absentEmployees.slice(0, 100).forEach(emp => {
       anomalies.push({
         employee_id: emp.id,
         name: emp.name,
-        department: emp.department || '未分配',
+        department: emp.department_name || '未分配',
         status: '未到',
         punch_time: null,
         reason: '未请假'
       });
     });
-
-    // 今日待审批请假数量
-    const [pendingLeaves] = await db.promise.execute(`
-      SELECT COUNT(*) AS pending_count
-      FROM leave_requests
-      WHERE status = 'pending'
-        AND start_date <= ? AND end_date >= ?
-    `, [today, today]);
-    
-    // 今日已批准请假数量
-    const [approvedLeaves] = await db.promise.execute(`
-      SELECT COUNT(*) AS approved_count
-      FROM leave_requests
-      WHERE status = 'approved'
-        AND start_date <= ? AND end_date >= ?
-    `, [today, today]);
 
     // 顶部提示
     let alertText = '✅ 今日考勤正常';
@@ -416,20 +460,25 @@ router.get('/today-stats', async (req, res) => {
       alertText = `⚠️ 今日异常：${parts.join('｜')}`;
     }
 
+    const resultData = {
+      date: today,
+      expectedCount,
+      presentCount,
+      absentCount,
+      leaveCount: leaveEmployeeIds.size, // 请假人数
+      anomalies,
+      pendingLeaveCount: pendingLeaveIds.size,
+      approvedLeaveCount: approvedLeaveIds.size,
+      alertText,
+      alertType
+    };
+    
+    // 缓存结果（1分钟）
+    cache.set(cacheKey, resultData, 60 * 1000);
+    
     res.json({
       success: true,
-      data: {
-        date: today,
-        expectedCount,
-        presentCount,
-        absentCount,
-        leaveCount: leaveEmployeeIds.length, // 请假人数
-        anomalies,
-        pendingLeaveCount: pendingLeaves[0].pending_count || 0,
-        approvedLeaveCount: approvedLeaves[0].approved_count || 0,
-        alertText,
-        alertType
-      }
+      data: resultData
     });
   } catch (error) {
     console.error('获取今日统计错误:', error);
@@ -674,17 +723,33 @@ router.get('/stats', async (req, res) => {
   try {
     const { startDate, endDate, departmentId } = req.query;
     
+    // 生成缓存键
+    const cacheKey = cache.generateKey('stats', { startDate, endDate, departmentId });
+    
+    // 尝试从缓存获取
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
     // 构建基础查询条件
     let whereConditions = [];
     const params = [];
     
+    // 优化：使用日期范围查询而不是 DATE() 函数，提高性能
+    const dateExpr = getDateExpr('a.punch_time');
+    
     if (startDate) {
-      whereConditions.push('DATE(a.punch_time) >= ?');
+      whereConditions.push(`${dateExpr} >= ?`);
       params.push(startDate);
     }
     
     if (endDate) {
-      whereConditions.push('DATE(a.punch_time) <= ?');
+      whereConditions.push(`${dateExpr} <= ?`);
       params.push(endDate);
     }
     
@@ -697,10 +762,10 @@ router.get('/stats', async (req, res) => {
       ? 'WHERE ' + whereConditions.join(' AND ')
       : '';
     
-    // 1. 每日考勤趋势
+    // 1. 每日考勤趋势（优化：使用日期表达式）
     const dailyTrendQuery = `
       SELECT 
-        DATE(a.punch_time) as date,
+        ${dateExpr} as date,
         COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
         COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
         COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
@@ -708,7 +773,7 @@ router.get('/stats', async (req, res) => {
       FROM attendance a
       ${departmentId ? 'LEFT JOIN employees e ON a.employee_id = e.id' : ''}
       ${whereClause}
-      GROUP BY DATE(a.punch_time)
+      GROUP BY ${dateExpr}
       ORDER BY date ASC
     `;
     
@@ -780,64 +845,45 @@ router.get('/stats', async (req, res) => {
       ORDER BY month ASC
     `;
     
-    // 执行查询（每个查询使用相同的参数）
-    const [dailyTrend] = await db.promise.execute(dailyTrendQuery, params);
+    // 并行执行所有查询以提高性能
+    const [dailyTrend, departmentStats, statusStats, abnormalStats, monthlyStats] = await Promise.all([
+      db.promise.execute(dailyTrendQuery, params),
+      db.promise.execute(departmentStatsQuery, params),
+      db.promise.execute(statusStatsQuery, params),
+      db.promise.execute(abnormalStatsQuery, params),
+      db.promise.execute(monthlyStatsQuery, params)
+    ]);
     
-    // 部门统计需要独立的参数（因为whereClause可能不同）
-    const deptWhereConditions = [];
-    const deptParams = [];
-    if (startDate) {
-      deptWhereConditions.push('DATE(a.punch_time) >= ?');
-      deptParams.push(startDate);
-    }
-    if (endDate) {
-      deptWhereConditions.push('DATE(a.punch_time) <= ?');
-      deptParams.push(endDate);
-    }
-    if (departmentId) {
-      deptWhereConditions.push('e.department_id = ?');
-      deptParams.push(departmentId);
-    }
-    const deptWhereClause = deptWhereConditions.length > 0 
-      ? 'WHERE ' + deptWhereConditions.join(' AND ')
-      : '';
+    const resultData = {
+      dailyTrend: dailyTrend[0],
+      departmentStats: departmentStats[0],
+      statusStats: statusStats[0],
+      abnormalStats: abnormalStats[0],
+      monthlyStats: monthlyStats[0]
+    };
     
-    const departmentStatsQueryFinal = `
-      SELECT 
-        COALESCE(d.name, '未分配') as department_name,
-        COUNT(CASE WHEN a.type = 'checkin' THEN 1 END) as checkin_count,
-        COUNT(CASE WHEN a.type = 'checkout' THEN 1 END) as checkout_count,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(CASE WHEN a.status = 'early' THEN 1 END) as early_count
-      FROM attendance a
-      LEFT JOIN employees e ON a.employee_id = e.id
-      LEFT JOIN departments d ON e.department_id = d.id
-      ${deptWhereClause}
-      GROUP BY d.id, d.name
-      ORDER BY checkin_count DESC
-    `;
-    
-    const [departmentStats] = await db.promise.execute(departmentStatsQueryFinal, deptParams);
-    const [statusStats] = await db.promise.execute(statusStatsQuery, params);
-    const [abnormalStats] = await db.promise.execute(abnormalStatsQuery, params);
-    const [monthlyStats] = await db.promise.execute(monthlyStatsQuery, params);
+    // 缓存结果（5分钟）
+    cache.set(cacheKey, resultData, 5 * 60 * 1000);
     
     res.json({
       success: true,
-      data: {
-        dailyTrend,
-        departmentStats,
-        statusStats,
-        abnormalStats,
-        monthlyStats
-      }
+      data: resultData
     });
   } catch (error) {
     console.error('获取统计数据错误:', error);
+    
+    // 返回更友好的错误信息
+    let errorMessage = '服务器错误';
+    if (error.message && error.message.includes('timeout')) {
+      errorMessage = '查询超时，请缩小日期范围后重试';
+    } else if (error.message && error.message.includes('connection')) {
+      errorMessage = '数据库连接失败，请稍后重试';
+    }
+    
     res.status(500).json({ 
       success: false, 
-      message: '服务器错误', 
-      error: error.message 
+      message: errorMessage, 
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -981,6 +1027,9 @@ router.post('/import-device', async (req, res) => {
       }
     }
     
+    // 数据变动后清理缓存
+    invalidateAttendanceCache();
+    
     res.json({
       success: true,
       message: '导入成功',
@@ -996,6 +1045,670 @@ router.post('/import-device', async (req, res) => {
       success: false,
       message: '导入失败',
       error: error.message
+    });
+  }
+});
+
+// 获取员工工作时长统计
+router.get('/worktime', async (req, res) => {
+  try {
+    const { employeeId, employeeName, departmentId, startDate, endDate, groupBy = 'day' } = req.query;
+    
+    // 支持按员工ID、员工姓名或部门查询
+    if (!employeeId && !employeeName && !departmentId) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择员工、输入员工姓名或选择部门'
+      });
+    }
+    
+    // 构建查询条件
+    let employeeIds = [];
+    let employeeList = [];
+    
+    if (employeeId) {
+      // 按员工ID查询
+      const empId = parseInt(employeeId);
+      if (isNaN(empId)) {
+        return res.status(400).json({
+          success: false,
+          message: '员工ID无效'
+        });
+      }
+      employeeIds = [empId];
+    } else if (employeeName) {
+      // 按员工姓名搜索
+      const [employees] = await db.promise.execute(
+        `SELECT id FROM employees WHERE name LIKE ? OR employee_no LIKE ?`,
+        [`%${employeeName}%`, `%${employeeName}%`]
+      );
+      if (employees.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: '未找到匹配的员工'
+        });
+      }
+      employeeIds = employees.map(emp => emp.id);
+    } else if (departmentId) {
+      // 按部门查询
+      const deptId = parseInt(departmentId);
+      if (isNaN(deptId)) {
+        return res.status(400).json({
+          success: false,
+          message: '部门ID无效'
+        });
+      }
+      const [employees] = await db.promise.execute(
+        `SELECT id FROM employees WHERE department_id = ?`,
+        [deptId]
+      );
+      if (employees.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: '该部门没有员工'
+        });
+      }
+      employeeIds = employees.map(emp => emp.id);
+    }
+    
+    if (employeeIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '未找到符合条件的员工'
+      });
+    }
+    
+    // 生成缓存键
+    const cacheKey = cache.generateKey('worktime', { 
+      employeeIds: employeeIds.sort().join(','), 
+      startDate, 
+      endDate, 
+      groupBy 
+    });
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return res.json({
+        success: true,
+        data: cachedData,
+        cached: true
+      });
+    }
+    
+    // 获取员工信息
+    const placeholders = employeeIds.map(() => '?').join(',');
+    const [employees] = await db.promise.execute(
+      `SELECT e.*, d.name as department_name 
+       FROM employees e 
+       LEFT JOIN departments d ON e.department_id = d.id 
+       WHERE e.id IN (${placeholders})`,
+      employeeIds
+    );
+    
+    if (employees.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '员工不存在'
+      });
+    }
+    
+    employeeList = employees;
+    
+    // 构建日期范围
+    const dateExpr = getDateExpr('a.punch_time');
+    let whereConditions = [`a.employee_id IN (${placeholders})`];
+    const params = [...employeeIds];
+    
+    if (startDate) {
+      whereConditions.push(`${dateExpr} >= ?`);
+      params.push(startDate);
+    }
+    
+    if (endDate) {
+      whereConditions.push(`${dateExpr} <= ?`);
+      params.push(endDate);
+    }
+    
+    const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+    
+    // 获取所有打卡记录（按日期分组，计算每天的工作时长）
+    let groupByExpr;
+    if (groupBy === 'day') {
+      groupByExpr = dateExpr;
+    } else if (groupBy === 'week') {
+      groupByExpr = dbType === 'postgresql' 
+        ? `DATE_TRUNC('week', a.punch_time)`
+        : `DATE_SUB(${dateExpr}, INTERVAL WEEKDAY(${dateExpr}) DAY)`;
+    } else if (groupBy === 'month') {
+      groupByExpr = dbType === 'postgresql'
+        ? `TO_CHAR(a.punch_time, 'YYYY-MM')`
+        : `DATE_FORMAT(a.punch_time, '%Y-%m')`;
+    } else {
+      groupByExpr = dateExpr;
+    }
+    
+    // 查询所有打卡记录（按日期分组处理）
+    const [allRecords] = await db.promise.execute(`
+      SELECT 
+        ${dateExpr} as date,
+        ${groupByExpr} as period,
+        a.employee_id,
+        a.type,
+        a.punch_time,
+        a.status
+      FROM attendance a
+      ${whereClause}
+      ORDER BY a.employee_id, a.punch_time ASC
+    `, params);
+    
+    // 获取请假记录
+    const leavePlaceholders = employeeIds.map(() => '?').join(',');
+    const leaveWhereConditions = [`employee_id IN (${leavePlaceholders})`];
+    const leaveParams = [...employeeIds];
+    if (startDate) {
+      leaveWhereConditions.push('start_date <= ? AND end_date >= ?');
+      leaveParams.push(endDate || '9999-12-31', startDate);
+    }
+    
+    const [leaveRecords] = await db.promise.execute(`
+      SELECT employee_id, start_date, end_date, leave_type, status, days
+      FROM leave_requests
+      WHERE ${leaveWhereConditions.join(' AND ')}
+      ORDER BY employee_id, start_date DESC
+    `, leaveParams);
+    
+    // 创建请假日期映射（按员工ID和日期）
+    const leaveDateMap = new Map();
+    leaveRecords.forEach(leave => {
+      const empId = leave.employee_id;
+      const start = moment(leave.start_date);
+      const end = moment(leave.end_date);
+      for (let d = moment(start); d.isSameOrBefore(end); d.add(1, 'day')) {
+        const dateKey = `${empId}_${d.format('YYYY-MM-DD')}`;
+        if (!leaveDateMap.has(dateKey)) {
+          leaveDateMap.set(dateKey, {
+            leave_type: leave.leave_type,
+            status: leave.status,
+            days: leave.days
+          });
+        }
+      }
+    });
+    
+    // 处理每天的记录（按日期分组）
+    const dateMap = new Map();
+    allRecords.forEach(record => {
+      // 处理日期格式
+      let dateKey;
+      if (record.date instanceof Date) {
+        dateKey = moment(record.date).format('YYYY-MM-DD');
+      } else if (typeof record.date === 'string') {
+        dateKey = moment(record.date).format('YYYY-MM-DD');
+      } else {
+        dateKey = record.date;
+      }
+      
+      const empId = record.employee_id;
+      const fullDateKey = `${empId}_${dateKey}`;
+      
+      // 处理period格式（可能是Date对象或字符串）
+      let periodKey;
+      if (record.period instanceof Date) {
+        if (groupBy === 'day') {
+          periodKey = moment(record.period).format('YYYY-MM-DD');
+        } else if (groupBy === 'week') {
+          periodKey = moment(record.period).format('YYYY-MM-DD');
+        } else if (groupBy === 'month') {
+          periodKey = moment(record.period).format('YYYY-MM');
+        } else {
+          periodKey = moment(record.period).format('YYYY-MM-DD');
+        }
+      } else if (typeof record.period === 'string') {
+        // 如果是ISO字符串，转换为日期格式
+        if (record.period.includes('T')) {
+          if (groupBy === 'day') {
+            periodKey = moment(record.period).format('YYYY-MM-DD');
+          } else if (groupBy === 'week') {
+            periodKey = moment(record.period).format('YYYY-MM-DD');
+          } else if (groupBy === 'month') {
+            periodKey = moment(record.period).format('YYYY-MM');
+          } else {
+            periodKey = moment(record.period).format('YYYY-MM-DD');
+          }
+        } else {
+          periodKey = record.period;
+        }
+      } else {
+        periodKey = record.period;
+      }
+      
+      if (!dateMap.has(fullDateKey)) {
+        dateMap.set(fullDateKey, {
+          employee_id: empId,
+          date: dateKey,
+          period: periodKey,
+          checkins: [],
+          checkouts: []
+        });
+      }
+      
+      const dayData = dateMap.get(fullDateKey);
+      if (record.type === 'checkin') {
+        dayData.checkins.push({
+          punch_time: record.punch_time,
+          status: record.status
+        });
+      } else if (record.type === 'checkout') {
+        dayData.checkouts.push({
+          punch_time: record.punch_time,
+          status: record.status
+        });
+      }
+    });
+    
+    // 计算每个员工每天的工作时长
+    const periodMap = new Map();
+    const employeeStatsMap = new Map();
+    
+    // 初始化员工统计
+    employeeList.forEach(emp => {
+      employeeStatsMap.set(emp.id, {
+        employee: emp,
+        totalDays: 0,
+        workDays: 0,
+        leaveDays: 0,
+        absentDays: 0,
+        totalSeconds: 0
+      });
+    });
+    
+    dateMap.forEach((dayData, fullDateKey) => {
+      const empId = dayData.employee_id;
+      const dateKey = dayData.date;
+      const date = moment(dateKey);
+      const leaveInfo = leaveDateMap.get(fullDateKey);
+      const employeeStats = employeeStatsMap.get(empId);
+      
+      if (!employeeStats) return; // 跳过不存在的员工
+      
+      let workSeconds = 0;
+      let hasCheckin = false;
+      let hasCheckout = false;
+      let checkinTime = null;
+      let checkoutTime = null;
+      let status = '正常';
+      
+      // 获取最早的 checkin 和最晚的 checkout
+      if (dayData.checkins.length > 0) {
+        hasCheckin = true;
+        // 找到最早的 checkin（按时间排序取第一个）
+        dayData.checkins.sort((a, b) => {
+          return moment(a.punch_time).diff(moment(b.punch_time));
+        });
+        const earliestCheckin = dayData.checkins[0];
+        checkinTime = moment(earliestCheckin.punch_time);
+        if (earliestCheckin.status === 'late') {
+          status = '迟到';
+        }
+      }
+      
+      if (dayData.checkouts.length > 0) {
+        hasCheckout = true;
+        // 找到最晚的 checkout（按时间排序取最后一个）
+        dayData.checkouts.sort((a, b) => {
+          return moment(a.punch_time).diff(moment(b.punch_time));
+        });
+        const latestCheckout = dayData.checkouts[dayData.checkouts.length - 1];
+        checkoutTime = moment(latestCheckout.punch_time);
+        if (latestCheckout.status === 'early') {
+          status = status === '迟到' ? '迟到早退' : '早退';
+        }
+      }
+      
+      // 处理跨天情况：如果只有checkin没有checkout，尝试查找第二天的checkout
+      if (hasCheckin && !hasCheckout) {
+        const nextDateKey = moment(dateKey).add(1, 'day').format('YYYY-MM-DD');
+        const nextFullDateKey = `${empId}_${nextDateKey}`;
+        const nextDayData = dateMap.get(nextFullDateKey);
+        if (nextDayData && nextDayData.checkouts.length > 0) {
+          // 找到第二天的第一个checkout（可能是夜班的下班时间）
+          nextDayData.checkouts.sort((a, b) => {
+            return moment(a.punch_time).diff(moment(b.punch_time));
+          });
+          const nextDayCheckout = nextDayData.checkouts[0];
+          const nextCheckoutTime = moment(nextDayCheckout.punch_time);
+          
+          // 检查是否是夜班（checkin在当天12点后，checkout在第二天12点前）
+          if (checkinTime.hour() >= 12 && nextCheckoutTime.hour() < 12) {
+            hasCheckout = true;
+            checkoutTime = nextCheckoutTime;
+            if (nextDayCheckout.status === 'early') {
+              status = status === '迟到' ? '迟到早退' : '早退';
+            }
+          }
+        }
+      }
+      
+      // 处理跨天情况：如果只有checkout没有checkin，尝试查找前一天的checkin
+      if (!hasCheckin && hasCheckout) {
+        const prevDateKey = moment(dateKey).subtract(1, 'day').format('YYYY-MM-DD');
+        const prevFullDateKey = `${empId}_${prevDateKey}`;
+        const prevDayData = dateMap.get(prevFullDateKey);
+        if (prevDayData && prevDayData.checkins.length > 0) {
+          // 找到前一天最后一个checkin（可能是夜班的上班时间）
+          prevDayData.checkins.sort((a, b) => {
+            return moment(a.punch_time).diff(moment(b.punch_time));
+          });
+          const prevDayCheckin = prevDayData.checkins[prevDayData.checkins.length - 1];
+          const prevCheckinTime = moment(prevDayCheckin.punch_time);
+          
+          // 检查是否是夜班（checkin在前一天12点后，checkout在当天12点前）
+          if (prevCheckinTime.hour() >= 12 && checkoutTime.hour() < 12) {
+            hasCheckin = true;
+            checkinTime = prevCheckinTime;
+            if (prevDayCheckin.status === 'late') {
+              status = '迟到';
+            }
+          }
+        }
+      }
+      
+      // 计算工作时长（秒）
+      if (hasCheckin && hasCheckout && checkinTime && checkoutTime) {
+        const checkinDate = checkinTime.format('YYYY-MM-DD');
+        const checkoutDate = checkoutTime.format('YYYY-MM-DD');
+        const diffSeconds = checkoutTime.diff(checkinTime, 'seconds');
+        const diffHours = checkoutTime.diff(checkinTime, 'hours', true);
+        
+        // 判断是否为跨天情况
+        const isCrossDay = checkinDate !== checkoutDate;
+        
+        // 判断是否为同一天但checkout时间早于checkin时间（可能是夜班，checkout被错误地标记为当天）
+        const isSameDayButReversed = checkinDate === checkoutDate && 
+                                      checkoutTime.hour() < checkinTime.hour() && 
+                                      checkoutTime.hour() < 12 && 
+                                      checkinTime.hour() >= 12;
+        
+        if (isCrossDay || isSameDayButReversed) {
+          // 跨天情况：处理夜班
+          let actualCheckoutTime = checkoutTime;
+          
+          // 如果是同一天但时间倒置，说明checkout应该是第二天的
+          if (isSameDayButReversed) {
+            actualCheckoutTime = moment(checkoutTime).add(1, 'day');
+          }
+          
+          const diffDays = actualCheckoutTime.diff(checkinTime, 'days');
+          const actualDiffHours = actualCheckoutTime.diff(checkinTime, 'hours', true);
+          const actualDiffSeconds = actualCheckoutTime.diff(checkinTime, 'seconds');
+          
+          // 判断是否为夜班：checkin在12点之后，checkout在第二天12点之前，且时间差在24小时内
+          const isNightShift = checkinTime.hour() >= 12 && actualCheckoutTime.hour() < 12 && diffDays === 1 && actualDiffHours <= 24;
+          
+          if (isNightShift) {
+            // 夜班：计算从checkin到checkout的工作时长
+            const endOfDay = moment(checkinTime).endOf('day');
+            const startOfNextDay = actualCheckoutTime.startOf('day');
+            const firstPart = endOfDay.diff(checkinTime, 'seconds'); // 当天剩余时间
+            const secondPart = actualCheckoutTime.diff(startOfNextDay, 'seconds'); // 第二天到checkout的时间
+            workSeconds = firstPart + secondPart;
+            
+            if (workSeconds > 0 && workSeconds <= 24 * 3600) {
+              employeeStats.workDays++;
+              employeeStats.totalSeconds += workSeconds;
+              status = '夜班';
+            } else {
+              workSeconds = 0;
+              status = '数据异常（跨天异常）';
+              console.warn(`员工 ${empId} 在 ${dateKey} 的夜班工作时长异常：${Math.floor(workSeconds / 3600)}小时`);
+            }
+          } else if (diffDays === 1 && actualDiffHours <= 24 && actualDiffSeconds > 0) {
+            // 其他跨天情况，但时间差在24小时内且为正数
+            workSeconds = actualDiffSeconds;
+            if (workSeconds > 0 && workSeconds <= 24 * 3600) {
+              employeeStats.workDays++;
+              employeeStats.totalSeconds += workSeconds;
+              status = '跨天';
+            } else {
+              workSeconds = 0;
+              status = '数据异常（跨天异常）';
+            }
+          } else {
+            workSeconds = 0;
+            status = '数据异常（跨天）';
+            console.warn(`员工 ${empId} 在 ${dateKey} 的打卡跨天异常：上班 ${checkinTime.format('YYYY-MM-DD HH:mm:ss')}，下班 ${actualCheckoutTime.format('YYYY-MM-DD HH:mm:ss')}，diffDays=${diffDays}, diffHours=${actualDiffHours.toFixed(2)}`);
+          }
+        } else {
+          // 同一天的情况
+          if (diffSeconds > 0) {
+            // 如果工作时长超过24小时，可能是数据错误，限制为24小时
+            if (diffSeconds > 24 * 3600) {
+              workSeconds = 24 * 3600;
+              status = '数据异常（超过24小时）';
+              console.warn(`员工 ${empId} 在 ${dateKey} 的工作时长异常：${Math.floor(diffSeconds / 3600)}小时`);
+            } else {
+              workSeconds = diffSeconds;
+              employeeStats.workDays++;
+              employeeStats.totalSeconds += workSeconds;
+            }
+          } else {
+            // 下班时间早于或等于上班时间，可能是数据错误
+            workSeconds = 0;
+            status = '数据异常';
+            console.warn(`员工 ${empId} 在 ${dateKey} 的打卡时间异常：上班 ${checkinTime.format('YYYY-MM-DD HH:mm:ss')}，下班 ${checkoutTime.format('YYYY-MM-DD HH:mm:ss')}`);
+          }
+        }
+      } else if (hasCheckin) {
+        status = '未下班';
+        employeeStats.workDays++;
+      } else if (hasCheckout) {
+        status = '未上班';
+      }
+      
+      // 判断未上班原因
+      if (!hasCheckin && !hasCheckout) {
+        if (leaveInfo) {
+          if (leaveInfo.status === 'approved') {
+            status = `请假(${leaveInfo.leave_type})`;
+            employeeStats.leaveDays++;
+          } else if (leaveInfo.status === 'pending') {
+            status = `待审批(${leaveInfo.leave_type})`;
+            employeeStats.leaveDays++;
+          } else {
+            status = '未到';
+            employeeStats.absentDays++;
+          }
+        } else {
+          status = '未到';
+          employeeStats.absentDays++;
+        }
+      }
+      
+      // 按时间段分组
+      let periodKey = dayData.period;
+      // 格式化periodKey用于分组（统一格式）
+      if (typeof periodKey === 'string' && periodKey.includes('T')) {
+        // 如果是ISO日期字符串，转换为日期格式
+        const date = moment(periodKey);
+        if (date.isValid()) {
+          if (groupBy === 'day') {
+            periodKey = date.format('YYYY-MM-DD');
+          } else if (groupBy === 'week') {
+            periodKey = date.format('YYYY-MM-DD');
+          } else if (groupBy === 'month') {
+            periodKey = date.format('YYYY-MM');
+          }
+        }
+      } else if (periodKey instanceof Date) {
+        const date = moment(periodKey);
+        if (groupBy === 'day') {
+          periodKey = date.format('YYYY-MM-DD');
+        } else if (groupBy === 'week') {
+          periodKey = date.format('YYYY-MM-DD');
+        } else if (groupBy === 'month') {
+          periodKey = date.format('YYYY-MM');
+        }
+      }
+      if (!periodMap.has(periodKey)) {
+        periodMap.set(periodKey, {
+          period: periodKey,
+          days: 0,
+          workDays: 0,
+          leaveDays: 0,
+          absentDays: 0,
+          totalSeconds: 0,
+          details: []
+        });
+      }
+      
+      const periodData = periodMap.get(periodKey);
+      periodData.days++;
+      // 只累加有效的工作时长（大于0且小于24小时）
+      if (workSeconds > 0 && workSeconds <= 24 * 3600) {
+        periodData.totalSeconds += workSeconds;
+      }
+      if (hasCheckin && hasCheckout && workSeconds > 0) {
+        periodData.workDays++;
+      } else if (leaveInfo && leaveInfo.status === 'approved') {
+        periodData.leaveDays++;
+      } else if (!hasCheckin && !hasCheckout && !leaveInfo) {
+        periodData.absentDays++;
+      }
+      
+      periodData.details.push({
+        employee_id: empId,
+        employee_name: employeeStats.employee.name,
+        date: dateKey,
+        checkin_time: checkinTime ? checkinTime.format('HH:mm:ss') : null,
+        checkout_time: checkoutTime ? checkoutTime.format('HH:mm:ss') : null,
+        work_seconds: workSeconds,
+        work_hours: Math.floor(workSeconds / 3600),
+        work_minutes: Math.floor((workSeconds % 3600) / 60),
+        work_seconds_remain: workSeconds % 60,
+        status: status,
+        leave_type: leaveInfo ? leaveInfo.leave_type : null
+      });
+    });
+    
+    // 转换为数组并排序（处理period格式）
+    const periodStats = Array.from(periodMap.values()).map(period => {
+      // 格式化period显示
+      let periodDisplay = period.period;
+      if (typeof period.period === 'string' && period.period.includes('T')) {
+        // 如果是ISO日期字符串，转换为日期格式
+        const date = moment(period.period);
+        if (date.isValid()) {
+          if (groupBy === 'day') {
+            periodDisplay = date.format('YYYY-MM-DD');
+          } else if (groupBy === 'week') {
+            periodDisplay = date.format('YYYY-MM-DD');
+          } else if (groupBy === 'month') {
+            periodDisplay = date.format('YYYY-MM');
+          }
+        }
+      } else if (period.period instanceof Date) {
+        const date = moment(period.period);
+        if (groupBy === 'day') {
+          periodDisplay = date.format('YYYY-MM-DD');
+        } else if (groupBy === 'week') {
+          periodDisplay = date.format('YYYY-MM-DD');
+        } else if (groupBy === 'month') {
+          periodDisplay = date.format('YYYY-MM');
+        }
+      }
+      return {
+        ...period,
+        period: periodDisplay,
+        periodKey: period.period // 保留原始值用于排序和查找
+      };
+    }).sort((a, b) => {
+      // 使用格式化后的period进行排序
+      return moment(b.period).diff(moment(a.period));
+    });
+    
+    // 计算汇总统计（所有员工的总和）
+    // 总天数应该是实际有数据的日期数（使用uniqueDates）
+    const uniqueDates = new Set();
+    dateMap.forEach((dayData, fullDateKey) => {
+      uniqueDates.add(dayData.date);
+    });
+    
+    let totalDays = uniqueDates.size;
+    let totalWorkDays = 0;
+    let totalLeaveDays = 0;
+    let totalAbsentDays = 0;
+    let totalSeconds = 0;
+    
+    employeeStatsMap.forEach(stats => {
+      totalWorkDays += stats.workDays;
+      totalLeaveDays += stats.leaveDays;
+      totalAbsentDays += stats.absentDays;
+      totalSeconds += stats.totalSeconds;
+    });
+    
+    // 格式化总时长
+    const totalHours = Math.floor(totalSeconds / 3600);
+    const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
+    const totalSecondsRemain = totalSeconds % 60;
+    
+    // 构建结果数据
+    const resultData = {
+      employees: employeeList.map(emp => ({
+        id: emp.id,
+        name: emp.name,
+        employee_no: emp.employee_no,
+        department: emp.department_name || '未分配',
+        position: emp.position
+      })),
+      employeeStats: Array.from(employeeStatsMap.values()).map(stats => {
+        const hours = Math.floor(stats.totalSeconds / 3600);
+        const minutes = Math.floor((stats.totalSeconds % 3600) / 60);
+        const seconds = stats.totalSeconds % 60;
+        // 计算该员工实际有数据的日期数
+        const empDates = new Set();
+        dateMap.forEach((dayData, fullDateKey) => {
+          if (dayData.employee_id === stats.employee.id) {
+            empDates.add(dayData.date);
+          }
+        });
+        return {
+          employee: stats.employee,
+          totalDays: empDates.size, // 实际有数据的日期数
+          workDays: stats.workDays,
+          leaveDays: stats.leaveDays,
+          absentDays: stats.absentDays,
+          totalSeconds: stats.totalSeconds,
+          formattedTime: `${hours}小时${minutes}分钟${seconds}秒`,
+          avgWorkHours: stats.workDays > 0 ? (hours / stats.workDays).toFixed(2) : 0
+        };
+      }),
+      summary: {
+        totalDays,
+        workDays: totalWorkDays,
+        leaveDays: totalLeaveDays,
+        absentDays: totalAbsentDays,
+        totalSeconds,
+        totalHours,
+        totalMinutes,
+        totalSecondsRemain,
+        formattedTime: `${totalHours}小时${totalMinutes}分钟${totalSecondsRemain}秒`,
+        avgWorkHours: totalWorkDays > 0 ? (totalHours / totalWorkDays).toFixed(2) : 0
+      },
+      periodStats
+    };
+    
+    // 缓存结果（5分钟）
+    cache.set(cacheKey, resultData, 5 * 60 * 1000);
+    
+    res.json({
+      success: true,
+      data: resultData
+    });
+  } catch (error) {
+    console.error('获取工作时长统计错误:', error);
+    res.status(500).json({
+      success: false,
+      message: '服务器错误',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });

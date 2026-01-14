@@ -5,6 +5,7 @@ const path = require('path');
 require('dotenv').config();
 
 const db = require('./config/database');
+const cacheStore = require('./utils/cache-store');
 const attendanceRoutes = require('./routes/attendance');
 const employeeRoutes = require('./routes/employee');
 const rulesRoutes = require('./routes/rules');
@@ -88,8 +89,14 @@ async function testDatabaseConnection() {
   }
 }
 
-// 异步测试连接（不阻塞服务器启动）
-testDatabaseConnection();
+// 异步测试连接并初始化缓存（不阻塞服务器启动）
+testDatabaseConnection().then(() => {
+  // 数据库连接成功后，初始化缓存
+  console.log('🔄 开始初始化缓存...');
+  cacheStore.syncAll().catch(err => {
+    console.error('❌ 缓存初始化失败:', err);
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`服务器运行在 http://localhost:${PORT}`);

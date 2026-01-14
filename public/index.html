@@ -50,6 +50,10 @@
                     <span class="nav-icon">📊</span>
                     <span class="nav-text">月度报表</span>
                 </a>
+                <a href="#worktime" class="nav-item" data-page="worktime">
+                    <span class="nav-icon">⏱️</span>
+                    <span class="nav-text">工作时长</span>
+                </a>
                 <a href="#rules" class="nav-item" data-page="rules">
                     <span class="nav-icon">⚙️</span>
                     <span class="nav-text">设置</span>
@@ -243,6 +247,131 @@
                                 </tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- 工作时长统计页面 -->
+                <div id="worktimePage" class="page">
+                    <h2 class="page-title">工作时长统计</h2>
+                    
+                    <!-- 筛选条件 -->
+                    <div class="worktime-filters">
+                        <div class="filter-group">
+                            <label>查询方式：</label>
+                            <select id="worktimeQueryType" class="form-control">
+                                <option value="employee">按员工</option>
+                                <option value="name">按姓名搜索</option>
+                                <option value="department">按部门</option>
+                            </select>
+                            <div id="worktimeEmployeeSelectWrapper" style="display: inline-block;">
+                                <label>选择员工：</label>
+                                <select id="worktimeEmployeeSelect" class="form-control">
+                                    <option value="">请选择员工</option>
+                                </select>
+                            </div>
+                            <div id="worktimeEmployeeNameWrapper" style="display: none;">
+                                <label>员工姓名/工号：</label>
+                                <input type="text" id="worktimeEmployeeName" class="form-control" placeholder="输入姓名或工号">
+                            </div>
+                            <div id="worktimeDepartmentWrapper" style="display: none;">
+                                <label>选择部门：</label>
+                                <select id="worktimeDepartmentSelect" class="form-control">
+                                    <option value="">请选择部门</option>
+                                </select>
+                            </div>
+                            <label>日期范围：</label>
+                            <input type="date" id="worktimeStartDate" class="form-control">
+                            <span>至</span>
+                            <input type="date" id="worktimeEndDate" class="form-control">
+                            <label>分组方式：</label>
+                            <select id="worktimeGroupBy" class="form-control">
+                                <option value="day">按日</option>
+                                <option value="week">按周</option>
+                                <option value="month">按月</option>
+                            </select>
+                            <button class="btn btn-search" id="worktimeSearchBtn">查询</button>
+                        </div>
+                    </div>
+
+                    <!-- 员工信息卡片 -->
+                    <div id="worktimeEmployeeCard" class="employee-card" style="display: none;">
+                        <div class="employee-header">
+                            <h3 id="worktimeEmployeeName"></h3>
+                            <span id="worktimeEmployeeInfo"></span>
+                        </div>
+                    </div>
+
+                    <!-- 汇总统计 -->
+                    <div id="worktimeSummary" class="worktime-summary" style="display: none;">
+                        <div class="summary-grid">
+                            <div class="summary-card">
+                                <div class="summary-label">总天数</div>
+                                <div class="summary-value" id="summaryTotalDays">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">上班天数</div>
+                                <div class="summary-value" id="summaryWorkDays">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">请假天数</div>
+                                <div class="summary-value" id="summaryLeaveDays">0</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">未到天数</div>
+                                <div class="summary-value" id="summaryAbsentDays">0</div>
+                            </div>
+                            <div class="summary-card highlight">
+                                <div class="summary-label">总工作时长</div>
+                                <div class="summary-value" id="summaryTotalTime">0小时0分钟0秒</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-label">平均每日工作时长</div>
+                                <div class="summary-value" id="summaryAvgTime">0小时</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 时间段统计 -->
+                    <div id="worktimePeriodStats" class="worktime-stats" style="display: none;">
+                        <h3 class="section-title">时间段统计</h3>
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>时间段</th>
+                                        <th>天数</th>
+                                        <th>上班天数</th>
+                                        <th>请假天数</th>
+                                        <th>未到天数</th>
+                                        <th>总工作时长</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="worktimePeriodTableBody">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 详细记录 -->
+                    <div id="worktimeDetails" class="worktime-details" style="display: none;">
+                        <h3 class="section-title">详细记录</h3>
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>日期</th>
+                                        <th>上班时间</th>
+                                        <th>下班时间</th>
+                                        <th>工作时长</th>
+                                        <th>状态</th>
+                                        <th>未上班原因</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="worktimeDetailsTableBody">
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
 
